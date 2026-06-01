@@ -23,6 +23,7 @@ Elemental is a tool for installing, configuring and updating operating system im
 * [Release Manifest Guide](./docs/release-manifest.md) - for consumers interested in creating a release manifest for their solution.
 * [Elemental and Ignition Integration](./docs/ignition-integration.md) - for consumers interested in understanding the nuances and capabilities of Ignition in the scope of Elemental.
 * [Troubleshooting Guide](./docs/troubleshooting.md) - guide for users and consumers in troubleshooting a running system.
+* [Changelog](./CHANGELOG.md) - running log of the changes in Elemental.
 
 ## Building from Source
 
