@@ -20,12 +20,14 @@ package action
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/suse/elemental/v3/pkg/installer"
 	"github.com/urfave/cli/v3"
 
 	cmdpkg "github.com/suse/elemental/v3/internal/cli/cmd"
@@ -95,7 +97,11 @@ func Customize(ctx context.Context, cmd *cli.Command) error {
 
 func resolveOutputPaths(fs vfs.FS, args *cmdpkg.CustomizeFlags) (imagePath, configPath string) {
 	imagePath = args.OutputPath
-	imageName := fmt.Sprintf("image-%s.%s", time.Now().UTC().Format("2006-01-02T15-04-05"), args.MediaType)
+	ext := args.MediaType
+	if mType, err := installer.StringToMediaType(args.MediaType); err == nil {
+		ext = mType.Ext()
+	}
+	imageName := fmt.Sprintf("image-%s.%s", time.Now().UTC().Format("2006-01-02T15-04-05"), ext)
 
 	if imagePath == "" {
 		imagePath = filepath.Join(args.ConfigDir, imageName)
@@ -147,13 +153,18 @@ func setupConfigManager(s *sys.System, configDir string, local bool) *config.Man
 func setupFileExtractor(ctx context.Context, s *sys.System, outDir config.Output, local bool) (extr *extractor.OCIFileExtractor, err error) {
 	const isoSearchGlob = "/iso/*default-iso*.iso"
 
-	if err := vfs.MkdirAll(s.FS(), outDir.ISOStoreDir(), vfs.DirPerm); err != nil {
+	storeDir := outDir.ISOStoreDir()
+	if cacheDir, cErr := os.UserCacheDir(); cErr == nil {
+		storeDir = filepath.Join(cacheDir, "elemental", "iso-store")
+	}
+
+	if err := vfs.MkdirAll(s.FS(), storeDir, vfs.DirPerm); err != nil {
 		return nil, fmt.Errorf("creating ISO store directory: %w", err)
 	}
 
 	return extractor.New(
 		[]string{isoSearchGlob},
-		extractor.WithStore(outDir.ISOStoreDir()),
+		extractor.WithStore(storeDir),
 		extractor.WithFS(s.FS()),
 		extractor.WithContext(ctx),
 		extractor.WithLocal(local),
