@@ -35,6 +35,8 @@ import (
 	"github.com/suse/elemental/v3/pkg/manifest/api/solution"
 	"github.com/suse/elemental/v3/pkg/manifest/resolver"
 	sysmock "github.com/suse/elemental/v3/pkg/sys/mock"
+
+	"go.yaml.in/yaml/v3"
 )
 
 type valuesResolverMock struct {
@@ -354,11 +356,11 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 						Repositories: []*kubernetes.HelmRepository{
 							{
 								Name: "apache",
-								URL:  "https://example.com/apache",
+								URL:  "https://example.com/apache/",
 							},
 							{
 								Name: "nginx",
-								URL:  "oci://example.com/web",
+								URL:  "oci://example.com/web/",
 							},
 						},
 					},
@@ -481,7 +483,7 @@ metadata:
 spec:
     chart: apache
     version: 10.7.0
-    repo: https://example.com/apache
+    repo: https://example.com/apache/
     valuesContent: |
         image:
             debug: true
@@ -576,7 +578,7 @@ spec:
 							},
 							{
 								Name: "nginx",
-								URL:  "oci://example.com/web",
+								URL:  "oci://example.com/web/", // trailing slash
 							},
 							{
 								Name: "storage",
@@ -853,6 +855,301 @@ spec:
 			Expect(err).To(MatchError("adding helm chart 'longhorn': adding dependent helm chart 'longhorn-crd': helm chart does not exist"))
 			Expect(charts).To(BeNil())
 			Expect(repositories).To(BeNil())
+		})
+	})
+
+	Describe("prioritizing charts", func() {
+		var rm *resolver.ResolvedManifest
+
+		BeforeEach(func() {
+			rm = &resolver.ResolvedManifest{
+				CorePlatform: &core.ReleaseManifest{
+					Components: core.Components{
+						Helm: &api.Helm{
+							Charts: []*api.HelmChart{
+								{
+									Name:       "Common Chart",
+									Chart:      "common-chart",
+									Version:    "core",
+									Namespace:  "default",
+									Repository: "common-repo",
+								},
+							},
+							Repositories: []*api.HelmRepository{
+								{
+									Name: "common-repo",
+									URL:  "https://charts.common-repo.lol",
+								},
+							},
+						},
+					},
+				},
+				SolutionExtension: &solution.ReleaseManifest{
+					Components: solution.Components{
+						Helm: &api.Helm{
+							Charts: []*api.HelmChart{
+								{
+									Name:       "Common Chart",
+									Chart:      "common-chart",
+									Version:    "solution",
+									Namespace:  "default",
+									Repository: "common-repo",
+								},
+							},
+							Repositories: []*api.HelmRepository{
+								{
+									Name: "common-repo",
+									URL:  "https://charts.common-repo.lol",
+								},
+							},
+						},
+					},
+				},
+			}
+		})
+
+		It("should prioritze core over solution", func() {
+			charts, _, err := enabledHelmCharts(rm, []release.HelmChart{{Name: "common-chart"}}, logger)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(charts[0].Version).To(Equal("core"))
+		})
+	})
+})
+
+type lcmResolver struct {
+	valuesFileContent string
+}
+
+func NewLcmResolver() *lcmResolver {
+	return &lcmResolver{}
+}
+
+func (l *lcmResolver) AddValuesFile(content string) {
+	if l != nil {
+		l.valuesFileContent = content
+	}
+}
+
+func (l *lcmResolver) Resolve(_ *helm.ValueSource) ([]byte, error) {
+	var yamlContent map[string]any
+
+	err := yaml.Unmarshal([]byte(l.valuesFileContent), &yamlContent)
+	Expect(err).ToNot(HaveOccurred())
+
+	v, err := yaml.Marshal(yamlContent)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling values: %w", err)
+	}
+
+	return v, nil
+}
+
+var _ = Describe("Test LCM dependencies evaluation", func() {
+	var rm *resolver.ResolvedManifest
+	var conf *image.Configuration
+	var crdDep, sucDep, cmDep api.HelmChartDependency
+	var lResolver *lcmResolver
+	var h *Helm
+	logger := log.New(log.WithDiscardAll())
+
+	BeforeEach(func() {
+		crdDep = api.HelmChartDependency{Name: "elemental-lifecycle-manager-crds", Type: "helm"}
+		sucDep = api.HelmChartDependency{Name: "system-upgrade-controller", Type: "helm"}
+		cmDep = api.HelmChartDependency{Name: "cert-manager", Type: "helm"}
+		rm = &resolver.ResolvedManifest{
+			CorePlatform: &core.ReleaseManifest{
+				Components: core.Components{
+					Helm: &api.Helm{
+						Charts: []*api.HelmChart{
+							{
+								Name:       "Elemental Lifecycle Manager",
+								Chart:      "elemental-lifecycle-manager",
+								Version:    "0.1.1",
+								Namespace:  "elemental-system",
+								Repository: "elemental-charts",
+								DependsOn:  []api.HelmChartDependency{crdDep, sucDep, cmDep},
+							},
+							{
+								Name:       "Elemental Lifecycle Manager CRDs",
+								Chart:      "elemental-lifecycle-manager-crds",
+								Version:    "0.1.1",
+								Namespace:  "elemental-system",
+								Repository: "elemental-charts",
+							},
+							{
+								Name:       "System Upgrade Controller",
+								Chart:      "system-upgrade-controller",
+								Version:    "109.0.2",
+								Namespace:  "cattle-system",
+								Repository: "rancher-charts",
+							},
+							{
+								Name:       "Cert Manager",
+								Chart:      "cert-manager",
+								Version:    "v1.20.3",
+								Namespace:  "cert-manager",
+								Repository: "jetstack",
+							},
+						},
+						Repositories: []*api.HelmRepository{
+							{
+								Name: "elemental-charts",
+								URL:  "oci://registry.suse.com/elemental/charts",
+							},
+							{
+								Name: "rancher-charts",
+								URL:  "https://charts.rancher.io/",
+							},
+							{
+								Name: "jetstack",
+								URL:  "https://charts.jetstack.io",
+							},
+						},
+					},
+				},
+			},
+			SolutionExtension: &solution.ReleaseManifest{
+				Components: solution.Components{
+					Helm: &api.Helm{
+						Charts: []*api.HelmChart{
+							{
+								Name:       "Rancher",
+								Chart:      "rancher",
+								Version:    "2.14.0",
+								Namespace:  "cattle-system",
+								Repository: "rancher-charts",
+								DependsOn:  []api.HelmChartDependency{{Name: "cert-manager", Type: "helm"}},
+							},
+						},
+						Repositories: []*api.HelmRepository{
+							{
+								Name: "rancher-charts",
+								URL:  "https://charts.rancher.io/",
+							},
+						},
+					},
+				},
+			},
+		}
+		conf = &image.Configuration{}
+		lResolver = NewLcmResolver()
+		h = &Helm{ValuesResolver: lResolver, Logger: logger}
+	})
+
+	When("rancher is not enabled", func() {
+		When("values file is not provided", func() {
+			It("should include cert-manager and system-upgrade-controller dependencies", func() {
+
+				conf.Release.Components.HelmCharts = []release.HelmChart{{Name: "elemental-lifecycle-manager"}}
+
+				err := h.evaluateLCMDeps(rm, conf)
+				Expect(err).ToNot(HaveOccurred())
+
+				chart := rm.CorePlatform.Components.Helm.Charts[0]
+				Expect(chart.GetName()).To(Equal("elemental-lifecycle-manager"))
+				Expect(len(chart.DependsOn)).To(Equal(3))
+				Expect(chart.DependsOn).To(ContainElements(sucDep, crdDep, cmDep))
+			})
+		})
+
+		When("values file is provided without values required for custom certificate", func() {
+			It("should include cert-manager in final dependencies", func() {
+				By("having no value related to cert-manager")
+
+				conf.Release.Components.HelmCharts = []release.HelmChart{{Name: "elemental-lifecycle-manager"}}
+				var valuesFile = "replicaCount: 2"
+				lResolver.AddValuesFile(valuesFile)
+
+				err := h.evaluateLCMDeps(rm, conf)
+				Expect(err).ToNot(HaveOccurred())
+
+				chart := rm.CorePlatform.Components.Helm.Charts[0]
+				Expect(chart.GetName()).To(Equal("elemental-lifecycle-manager"))
+				Expect(len(chart.DependsOn)).To(Equal(3))
+				Expect(chart.DependsOn).To(ContainElements(sucDep, crdDep))
+
+				By("having incomplete values for cert-manager")
+				valuesFile = `
+webhook:
+  cert:
+    createDefault: false
+`
+				lResolver.AddValuesFile(valuesFile)
+				err = h.evaluateLCMDeps(rm, conf)
+				Expect(err).ToNot(HaveOccurred())
+
+				chart = rm.CorePlatform.Components.Helm.Charts[0]
+				Expect(chart.GetName()).To(Equal("elemental-lifecycle-manager"))
+				Expect(len(chart.DependsOn)).To(Equal(2))
+				Expect(chart.DependsOn).To(ContainElements(sucDep, crdDep))
+			})
+		})
+
+		When("values file provided with values for custom certificate", func() {
+			It("should not include cert-manager in dependencies", func() {
+				conf.Release.Components.HelmCharts = []release.HelmChart{{Name: "elemental-lifecycle-manager"}}
+				var valuesFile = `
+webhook:
+  cert:
+    createDefault: false
+    existingSecret: custom-secret
+    caBundle: ""
+`
+				lResolver.AddValuesFile(valuesFile)
+
+				err := h.evaluateLCMDeps(rm, conf)
+				Expect(err).ToNot(HaveOccurred())
+
+				chart := rm.CorePlatform.Components.Helm.Charts[0]
+				Expect(chart.GetName()).To(Equal("elemental-lifecycle-manager"))
+				Expect(len(chart.DependsOn)).To(Equal(2))
+				Expect(chart.DependsOn).To(ContainElements(sucDep, crdDep))
+				Expect(chart.DependsOn).ToNot(ContainElement(cmDep))
+			})
+		})
+	})
+
+	When("rancher is enabled", func() {
+		When("values file is not provided", func() {
+			It("should not include SUC, but still include cert-manager dependency", func() {
+				conf.Release.Components.HelmCharts = []release.HelmChart{
+					{Name: "elemental-lifecycle-manager"},
+					{Name: "rancher"},
+				}
+				err := h.evaluateLCMDeps(rm, conf)
+				Expect(err).ToNot(HaveOccurred())
+
+				chart := rm.CorePlatform.Components.Helm.Charts[0]
+				Expect(chart.GetName()).To(Equal("elemental-lifecycle-manager"))
+				Expect(len(chart.DependsOn)).To(Equal(2))
+				Expect(chart.DependsOn).To(ContainElements(crdDep, cmDep))
+				Expect(chart.DependsOn).ToNot(ContainElement(sucDep))
+			})
+		})
+
+		When("values file with certificate configurations is provided", func() {
+			It("should neither include SUC nor cert-manager as LCM dependency", func() {
+				conf.Release.Components.HelmCharts = []release.HelmChart{
+					{Name: "elemental-lifecycle-manager"},
+					{Name: "rancher"},
+				}
+				var valuesFile = `
+webhook:
+  cert:
+    createDefault: false
+    existingSecret: custom-secret
+    caBundle: ""
+`
+				lResolver.AddValuesFile(valuesFile)
+				err := h.evaluateLCMDeps(rm, conf)
+				Expect(err).ToNot(HaveOccurred())
+
+				chart := rm.CorePlatform.Components.Helm.Charts[0]
+				Expect(chart.GetName()).To(Equal("elemental-lifecycle-manager"))
+				Expect(len(chart.DependsOn)).To(Equal(1))
+				Expect(chart.DependsOn).To(ContainElement(crdDep))
+				Expect(chart.DependsOn).ToNot(ContainElements(sucDep, cmDep))
+			})
 		})
 	})
 })

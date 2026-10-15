@@ -19,6 +19,7 @@ package unpack
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"os"
@@ -174,7 +175,7 @@ func (o OCI) unpack(ctx context.Context, destination string, excludes ...string)
 	var img containerregistry.Image
 
 	err = backoff.Retry(func() error {
-		img, err = fetchImage(ctx, ref, *platform, o.local)
+		img, err = fetchImage(ctx, ref, *platform, o.local, o.verify)
 		return err
 	}, backoff.WithMaxRetries(backoff.NewConstantBackOff(3*time.Second), 3))
 	if err != nil {
@@ -204,15 +205,23 @@ func (o OCI) unpack(ctx context.Context, destination string, excludes ...string)
 	return digest.String(), err
 }
 
-func fetchImage(ctx context.Context, ref name.Reference, platform containerregistry.Platform, local bool) (containerregistry.Image, error) {
+func fetchImage(ctx context.Context, ref name.Reference, platform containerregistry.Platform, local bool, verify bool) (containerregistry.Image, error) {
 	if local {
 		return daemon.Image(ref,
 			daemon.WithContext(ctx),
 			daemon.WithUnbufferedOpener())
 	}
 
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if !verify {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		transport.TLSClientConfig.InsecureSkipVerify = true
+	}
+
 	return remote.Image(ref,
-		remote.WithTransport(http.DefaultTransport),
+		remote.WithTransport(transport),
 		remote.WithPlatform(platform),
 		remote.WithAuthFromKeychain(authn.DefaultKeychain),
 		remote.WithContext(ctx),
