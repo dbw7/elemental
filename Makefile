@@ -7,7 +7,7 @@ ROOTLESSKIT?=no
 
 BUILD_DIR?=./build
 
-PKG?=./pkg/... ./internal/...
+PKG?=./pkg/... ./internal/... ./version/...
 COVER_PKG?=github.com/suse/elemental/...
 INTEG_PKG?=./tests/integration/...
 
@@ -19,12 +19,12 @@ GO_FILES+=./go.sum
 
 GIT_COMMIT?=$(shell git rev-parse HEAD)
 GIT_COMMIT_SHORT?=$(shell git rev-parse --short HEAD)
-GIT_TAG?=$(shell git describe --candidates=50 --abbrev=0 --tags 2>/dev/null || echo "v0.0.1" )
+GIT_TAG?=$(shell git describe --candidates=50 --abbrev=0 --tags 2>/dev/null || echo "v3.0" )
 VERSION?=$(GIT_TAG)-g$(GIT_COMMIT_SHORT)
 
 LDFLAGS:=-w -s
-LDFLAGS+=-X "$(GO_MODULE)/internal/cli/cmd.version=$(GIT_TAG)"
-LDFLAGS+=-X "$(GO_MODULE)/internal/cli/cmd.gitCommit=$(GIT_COMMIT)"
+LDFLAGS+=-X "$(GO_MODULE)/version.version=$(GIT_TAG)"
+LDFLAGS+=-X "$(GO_MODULE)/version.gitCommit=$(GIT_COMMIT)"
 
 GO_BUILD_ARGS?=-ldflags '$(LDFLAGS)'
 

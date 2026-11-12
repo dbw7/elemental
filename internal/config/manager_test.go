@@ -48,15 +48,20 @@ func TestConfigurationSuite(t *testing.T) {
 }
 
 type helmConfiguratorMock struct {
-	configureFunc func(*image.Configuration, *resolver.ResolvedManifest, *butane.Config) ([]string, error)
+	configureFunc   func(*image.Configuration, *resolver.ResolvedManifest, *butane.Config) ([]string, error)
+	containerImages []string
 }
 
-func (h *helmConfiguratorMock) Configure(conf *image.Configuration, manifest *resolver.ResolvedManifest, bConf *butane.Config) ([]string, error) {
+func (h *helmConfiguratorMock) Configure(_ context.Context, conf *image.Configuration, manifest *resolver.ResolvedManifest, bConf *butane.Config) ([]string, error) {
 	if h.configureFunc != nil {
 		return h.configureFunc(conf, manifest, bConf)
 	}
 
 	panic("not implemented")
+}
+
+func (h *helmConfiguratorMock) ContainerImages() []string {
+	return h.containerImages
 }
 
 func findFileContentsInConfig(config *butane.Config, name string) *string {
@@ -136,36 +141,7 @@ passwd:
   - name: pipo
     password_hash: $y$j9T$aUmgEDoFIDPhGxEe2FUjc/$C5A...
 `
-	var activeReleaseManifest = &resolver.ResolvedManifest{
-		CorePlatform: &core.ReleaseManifest{
-			Components: core.Components{
-				Kubernetes: &core.Kubernetes{
-					Version: "v1.35.0+rke2r1",
-					Image:   "registry.example.com/rke2:1.35_1.0",
-				},
-				Systemd: api.Systemd{
-					Extensions: []api.SystemdExtension{
-						{
-							Name:  "foo",
-							Image: "https://foo.bar/remote-foo-image",
-						},
-					},
-				},
-			},
-		},
-		SolutionExtension: &solution.ReleaseManifest{
-			Components: solution.Components{
-				Helm: &api.Helm{
-					Charts: []*api.HelmChart{
-						{
-							Name:  "bar",
-							Chart: "bar",
-						},
-					},
-				},
-			},
-		},
-	}
+	var activeReleaseManifest *resolver.ResolvedManifest
 	var activeConfig = &image.Configuration{
 		Network: image.Network{
 			ConfigDir: configDir.NetworkDir(),
@@ -211,11 +187,49 @@ passwd:
 		defaultResolveFunc = func(uri string) (*resolver.ResolvedManifest, error) {
 			return &resolver.ResolvedManifest{
 				CorePlatform: &core.ReleaseManifest{
-					Components: core.Components{
+					Metadata: &core.Metadata{
+						Elemental: &core.Elemental{
+							Version: "3.0",
+						},
+					}, Components: core.Components{
 						Kubernetes: &core.Kubernetes{},
 					},
 				},
 			}, nil
+		}
+		activeReleaseManifest = &resolver.ResolvedManifest{
+			CorePlatform: &core.ReleaseManifest{
+				Metadata: &core.Metadata{
+					Elemental: &core.Elemental{
+						Version: "3.0",
+					},
+				}, Components: core.Components{
+					Kubernetes: &core.Kubernetes{
+						Version: "v1.35.0+rke2r1",
+						Image:   "registry.example.com/rke2:1.35_1.0",
+					},
+					Systemd: api.Systemd{
+						Extensions: []api.SystemdExtension{
+							{
+								Name:  "foo",
+								Image: "https://foo.bar/remote-foo-image",
+							},
+						},
+					},
+				},
+			},
+			SolutionExtension: &solution.ReleaseManifest{
+				Components: solution.Components{
+					Helm: &api.Helm{
+						Charts: []*api.HelmChart{
+							{
+								Name:  "bar",
+								Chart: "bar",
+							},
+						},
+					},
+				},
+			},
 		}
 	})
 
@@ -276,14 +290,34 @@ passwd:
 		Expect(err).ToNot(HaveOccurred())
 		_, err = fs.Stat(filepath.Join(output.OverlaysDir(), image.KubernetesInstallPath(), "install.sh"))
 		Expect(err).ToNot(HaveOccurred())
-		_, err = fs.Stat(output.InitrdExtensionFile())
+		_, err = fs.Stat(filepath.Join(output.FirstbootConfigDir(), image.IgnitionFilePath()))
 		Expect(err).ToNot(HaveOccurred())
 		_, err = fs.Stat(filepath.Join(output.CatalystConfigDir(), "network", "nmstate1.yaml"))
 		Expect(err).ToNot(HaveOccurred())
 		_, err = fs.Stat(filepath.Join(output.OverlaysDir(), image.ExtensionsPath(), "remote-foo-image"))
 		Expect(err).ToNot(HaveOccurred())
-		_, err = fs.Stat(output.InitrdExtensionFile())
-		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Fails to configure when elemental version in core platform is not supported", func() {
+		By("Using a manifest ahead of the current elemental version")
+		conf := activeConfig
+		activeReleaseManifest.CorePlatform.Metadata.Elemental.Version = "3.1"
+		m := NewManager(
+			system,
+			&helmConfiguratorMock{configureFunc: defaultHelmFunc},
+			WithManifestResolver(&resolverMock{resolveFunc: func(uri string) (*resolver.ResolvedManifest, error) {
+				if uri == activeConfig.Release.ManifestURI {
+					return activeReleaseManifest, nil
+				}
+
+				panic("missing release manifest")
+			}}),
+		)
+
+		r, err := m.ConfigureComponents(context.Background(), conf, output)
+		Expect(r).To(BeNil())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("core platform not supported with current elemental version"))
 	})
 
 	It("Fails to resolve release manifest during configuration", func() {

@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package build
+package cache_test
 
 import (
 	"testing"
@@ -24,7 +24,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-func TestBuildSuite(t *testing.T) {
+func TestCacheSuite(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Build test suite")
+	RunSpecs(t, "Cache test suite")
 }

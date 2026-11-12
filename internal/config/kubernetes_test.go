@@ -32,14 +32,17 @@ import (
 	"github.com/suse/elemental/v3/pkg/log"
 	"github.com/suse/elemental/v3/pkg/manifest/api/core"
 	"github.com/suse/elemental/v3/pkg/manifest/resolver"
+	"github.com/suse/elemental/v3/pkg/semverutil"
 	"github.com/suse/elemental/v3/pkg/sys"
+	"github.com/suse/elemental/v3/pkg/sys/vfs"
+	"go.yaml.in/yaml/v3"
 )
 
 var _ = Describe("Kubernetes", func() {
 	Describe("Resources trigger", func() {
 		It("Skips manifests setup if manifests are not provided", func() {
 			conf := &image.Configuration{}
-			Expect(needsManifestsSetup(conf)).To(BeFalse())
+			Expect(conf.NeedsManifestsSetup()).To(BeFalse())
 		})
 
 		It("Requires manifests setup if local manifests are provided", func() {
@@ -48,7 +51,7 @@ var _ = Describe("Kubernetes", func() {
 					LocalManifests: []string{"/apache.yaml"},
 				},
 			}
-			Expect(needsManifestsSetup(conf)).To(BeTrue())
+			Expect(conf.NeedsManifestsSetup()).To(BeTrue())
 		})
 
 		It("Requires manifests setup if remote manifests are provided", func() {
@@ -57,12 +60,12 @@ var _ = Describe("Kubernetes", func() {
 					RemoteManifests: []string{"https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.31/deploy/local-path-storage.yaml"},
 				},
 			}
-			Expect(needsManifestsSetup(conf)).To(BeTrue())
+			Expect(conf.NeedsManifestsSetup()).To(BeTrue())
 		})
 
 		It("Skips Helm setup if charts are not provided", func() {
 			conf := &image.Configuration{}
-			Expect(needsHelmChartsSetup(conf)).To(BeFalse())
+			Expect(conf.NeedsHelmChartsSetup()).To(BeFalse())
 		})
 
 		It("Requires Helm setup if user charts are provided", func() {
@@ -75,7 +78,7 @@ var _ = Describe("Kubernetes", func() {
 					},
 				},
 			}
-			Expect(needsHelmChartsSetup(conf)).To(BeTrue())
+			Expect(conf.NeedsHelmChartsSetup()).To(BeTrue())
 		})
 
 		It("Requires Helm setup if core charts are provided", func() {
@@ -91,7 +94,7 @@ var _ = Describe("Kubernetes", func() {
 				},
 			}
 
-			Expect(needsHelmChartsSetup(conf)).To(BeTrue())
+			Expect(conf.NeedsHelmChartsSetup()).To(BeTrue())
 		})
 
 		It("Requires Helm setup if solution charts are provided", func() {
@@ -107,7 +110,7 @@ var _ = Describe("Kubernetes", func() {
 				},
 			}
 
-			Expect(needsHelmChartsSetup(conf)).To(BeTrue())
+			Expect(conf.NeedsHelmChartsSetup()).To(BeTrue())
 		})
 	})
 
@@ -118,9 +121,11 @@ var _ = Describe("Kubernetes", func() {
 		var defaultManifest *resolver.ResolvedManifest
 		var defaultUnpack func(ctx context.Context, imageRef, destDir string) error
 		var defaultHelm *helmConfiguratorMock
+		var output Output
 
 		BeforeEach(func() {
 			config = &butane.Config{}
+			output = Output{RootPath: GinkgoT().TempDir()}
 
 			system, err = sys.NewSystem(
 				sys.WithLogger(log.New(log.WithDiscardAll())),
@@ -175,7 +180,7 @@ var _ = Describe("Kubernetes", func() {
 				},
 			}
 
-			err := m.configureKubernetes(context.Background(), conf, defaultManifest, config)
+			err := m.configureKubernetes(context.Background(), conf, defaultManifest, output, config)
 			Expect(err).To(HaveOccurred())
 			Expect(err).To(MatchError("configuring helm charts: helm error"))
 		})
@@ -212,7 +217,7 @@ var _ = Describe("Kubernetes", func() {
 				},
 			}
 
-			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, config)).To(Succeed())
+			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, output, config)).To(Succeed())
 
 			// Verify deployment script contents
 			data := findFileContentsInConfig(config, filepath.Join("/", image.KubernetesPath(), k8sResDeployScriptName))
@@ -243,10 +248,50 @@ var _ = Describe("Kubernetes", func() {
 				},
 			}
 
-			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, config)).To(Succeed())
+			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, output, config)).To(Succeed())
 
 			Expect(findFileContentsInConfig(config, filepath.Join("/", image.KubernetesPath(), k8sConfDeployScriptName))).NotTo(BeNil())
 		})
+
+		DescribeTable("Selects the k8s config unit template based on the Elemental version",
+			func(elementalVersion string, legacy bool) {
+				if elementalVersion != "" {
+					defaultManifest.CorePlatform.Metadata = &core.Metadata{
+						Elemental: &core.Elemental{Version: elementalVersion},
+					}
+				}
+
+				m := NewManager(
+					system,
+					defaultHelm,
+					WithDownloader(&downloaderMock{}),
+					WithUnpackFunc(defaultUnpack),
+				)
+
+				Expect(m.configureKubernetes(context.Background(), &image.Configuration{}, defaultManifest, output, config)).To(Succeed())
+
+				var unit *string
+				for _, u := range config.Systemd.Units {
+					if u.Name == k8sConfigUnitName {
+						unit = u.Contents
+					}
+				}
+				Expect(unit).NotTo(BeNil())
+				if legacy {
+					Expect(*unit).To(ContainSubstring("semodule -i /usr/share/selinux/packages/rke2.pp"))
+				} else {
+					Expect(*unit).NotTo(ContainSubstring("semodule"))
+				}
+				Expect(*unit).To(ContainSubstring(k8sConfDeployScriptName))
+			},
+			Entry("legacy template for 3.0", "3.0", true),
+			Entry("legacy template for 3.0.5", "3.0.5", true),
+			Entry("legacy template for 3.1.0-rc1 (pre-release)", "3.1.0-rc1", true),
+			Entry("current template for 3.1", "3.1", false),
+			Entry("current template for 3.1.0", "3.1.0", false),
+			Entry("current template when version is undefined", "", false),
+			Entry("current template when version is invalid", "not-a-version", false),
+		)
 
 		It("Defaults to a server init node for a single-node cluster with no declared nodes", func() {
 			m := NewManager(
@@ -258,7 +303,7 @@ var _ = Describe("Kubernetes", func() {
 
 			conf := &image.Configuration{Kubernetes: kubernetes.Kubernetes{}}
 
-			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, config)).To(Succeed())
+			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, output, config)).To(Succeed())
 
 			data := findFileContentsInConfig(config, filepath.Join("/", image.KubernetesPath(), k8sConfDeployScriptName))
 			Expect(data).NotTo(BeNil())
@@ -293,7 +338,7 @@ var _ = Describe("Kubernetes", func() {
 				},
 			}
 
-			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, config)).To(Succeed())
+			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, output, config)).To(Succeed())
 
 			data := findFileContentsInConfig(config, filepath.Join("/", image.KubernetesPath(), k8sConfDeployScriptName))
 			Expect(data).NotTo(BeNil())
@@ -324,7 +369,7 @@ var _ = Describe("Kubernetes", func() {
 				},
 			}
 
-			err := m.configureKubernetes(context.Background(), conf, defaultManifest, config)
+			err := m.configureKubernetes(context.Background(), conf, defaultManifest, output, config)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring(`could not find suitable init node from node list: [{Hostname:node01 Type:agent Init:false}]`))
 		})
@@ -395,7 +440,7 @@ var _ = Describe("Kubernetes", func() {
 				},
 			}
 
-			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, config)).To(Succeed())
+			Expect(m.configureKubernetes(context.Background(), conf, defaultManifest, output, config)).To(Succeed())
 
 			// Verify deployment script contents
 			data := findFileContentsInConfig(config, filepath.Join("/", image.KubernetesPath(), k8sResDeployScriptName))
@@ -435,6 +480,184 @@ data:
 			data = findFileContentsInConfig(config, filepath.Join("/", image.KubernetesManifestsPath(), "example-auth-priority.yaml"))
 			Expect(data).NotTo(BeNil())
 			Expect(*data).To(ContainSubstring(expectedExampleManifestContents))
+		})
+	})
+
+	Describe("Image sets", func() {
+		var system *sys.System
+		var serverConfig string
+		var installDir string
+		var rm *resolver.ResolvedManifest
+		var conf *image.Configuration
+		var output Output
+		var manager *Manager
+
+		writeList := func(set, contents string) {
+			Expect(system.FS().WriteFile(filepath.Join(installDir, kubernetes.ImageListName(set, "amd64")), []byte(contents), 0o644)).To(Succeed())
+		}
+
+		BeforeEach(func() {
+			var err error
+
+			serverConfig = filepath.Join(GinkgoT().TempDir(), "server.yaml")
+			output = Output{RootPath: GinkgoT().TempDir()}
+			installDir = filepath.Join(output.OverlaysDir(), image.KubernetesInstallPath())
+
+			system, err = sys.NewSystem(
+				sys.WithLogger(log.New(log.WithDiscardAll())),
+			)
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(vfs.MkdirAll(system.FS(), installDir, vfs.DirPerm)).To(Succeed())
+			writeList("core", "registry.example.com/rke2-runtime:1.35\n\n# comment\nregistry.example.com/pause:3.6 \n")
+			writeList("canal", "registry.example.com/hardened-calico:3.32")
+			writeList("cilium", "registry.example.com/cilium:1.18\nregistry.example.com/pause:3.6\n")
+
+			rm = &resolver.ResolvedManifest{
+				CorePlatform: &core.ReleaseManifest{
+					Components: core.Components{
+						Kubernetes: &core.Kubernetes{
+							Version: "v1.35.0+rke2r1",
+							Image:   "registry.example.com/rke2:1.35_1.0",
+						},
+					},
+				},
+			}
+
+			conf = &image.Configuration{
+				Kubernetes: kubernetes.Kubernetes{Config: kubernetes.Config{ServerFilePath: serverConfig}},
+			}
+
+			manager = NewManager(system, nil, WithPlatform("linux/amd64"))
+		})
+
+		It("Selects the core and the configured CNI images", func() {
+			Expect(system.FS().WriteFile(serverConfig, []byte("cni: cilium\n"), 0o644)).To(Succeed())
+
+			images, err := manager.kubernetesImages(rm, conf, output)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(images).To(Equal([]string{
+				"registry.example.com/rke2-runtime:1.35",
+				"registry.example.com/pause:3.6",
+				"registry.example.com/cilium:1.18",
+				"registry.example.com/pause:3.6",
+			}))
+		})
+
+		It("Selects the default CNI when none is configured", func() {
+			images, err := manager.kubernetesImages(rm, conf, output)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(images).To(Equal([]string{
+				"registry.example.com/rke2-runtime:1.35",
+				"registry.example.com/pause:3.6",
+				"registry.example.com/hardened-calico:3.32",
+			}))
+		})
+
+		It("Fails when a selected set is not shipped by the distribution image", func() {
+			Expect(system.FS().WriteFile(serverConfig, []byte("cni: multus,cilium\n"), 0o644)).To(Succeed())
+
+			_, err := manager.kubernetesImages(rm, conf, output)
+			Expect(err).To(MatchError(`kubernetes image set "multus" is not shipped by registry.example.com/rke2:1.35_1.0: rke2-images-multus.linux-amd64.txt not found, available: canal, cilium, core`))
+		})
+
+		It("Fails when the lists are for another architecture", func() {
+			manager = NewManager(system, nil, WithPlatform("linux/arm64"))
+
+			_, err := manager.kubernetesImages(rm, conf, output)
+			Expect(err).To(MatchError(`kubernetes image set "core" is not shipped by registry.example.com/rke2:1.35_1.0: rke2-images-core.linux-arm64.txt not found, available: `))
+		})
+
+		It("Fails when an image list is empty", func() {
+			writeList("canal", "\n# nothing here\n")
+
+			_, err := manager.kubernetesImages(rm, conf, output)
+			Expect(err).To(MatchError(`kubernetes image set "canal" is empty: rke2-images-canal.linux-amd64.txt lists no images`))
+		})
+
+		It("Selects nothing when the release has no kubernetes component", func() {
+			rm.CorePlatform.Components.Kubernetes = nil
+
+			images, err := manager.kubernetesImages(rm, conf, output)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(images).To(BeEmpty())
+		})
+	})
+
+	Describe("Registry mirrors", func() {
+		It("Prepends the embedded registry to parsed mirrors without losing them", func() {
+			registries := kubernetes.ConfigMap{}
+			Expect(yaml.Unmarshal([]byte(`
+mirrors:
+  docker.io:
+    endpoint:
+      - https://mirror.example.com
+    rewrite:
+      "^rancher/(.*)": "mirrored/rancher/$1"
+configs:
+  mirror.example.com:
+    tls:
+      insecure_skip_verify: true
+`), &registries)).To(Succeed())
+
+			addRegistryMirrors(registries, []string{"docker.io", "quay.io"}, "6545")
+
+			out, err := yaml.Marshal(registries)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).To(Equal(`configs:
+    mirror.example.com:
+        tls:
+            insecure_skip_verify: true
+mirrors:
+    docker.io:
+        endpoint:
+            - http://localhost:6545
+            - https://mirror.example.com
+        rewrite:
+            ^rancher/(.*): mirrored/rancher/$1
+    quay.io:
+        endpoint:
+            - http://localhost:6545
+`))
+		})
+
+		It("Creates the mirrors section when missing", func() {
+			registries := kubernetes.ConfigMap{}
+			addRegistryMirrors(registries, []string{"docker.io"}, "6545")
+
+			mirrors, ok := registries["mirrors"].(kubernetes.ConfigMap)
+			Expect(ok).To(BeTrue())
+			mirror, ok := mirrors["docker.io"].(kubernetes.ConfigMap)
+			Expect(ok).To(BeTrue())
+			Expect(mirror["endpoint"]).To(Equal([]any{"http://localhost:6545"}))
+		})
+	})
+
+	Describe("generateK8sConfigUnit", func() {
+		parse := func(v string) semverutil.Version {
+			version, err := semverutil.Parse(v)
+			Expect(err).NotTo(HaveOccurred())
+			return version
+		}
+
+		It("renders the legacy unit below 3.1.0", func() {
+			unit, err := generateK8sConfigUnit("/deploy.sh", parse("3.0.0"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unit).To(ContainSubstring("ExecStartPre=/bin/sh -c \"semodule -i /usr/share/selinux/packages/rke2.pp\""))
+			Expect(unit).To(ContainSubstring("ExecStart=/bin/bash \"/deploy.sh\""))
+		})
+
+		It("renders the current unit from 3.1.0", func() {
+			unit, err := generateK8sConfigUnit("/deploy.sh", parse("3.1.0"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unit).NotTo(ContainSubstring("semodule"))
+			Expect(unit).To(ContainSubstring("ExecStart=/bin/bash \"/deploy.sh\""))
+		})
+
+		It("renders the current unit for a zero-value version", func() {
+			unit, err := generateK8sConfigUnit("/deploy.sh", semverutil.Version{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unit).NotTo(ContainSubstring("semodule"))
 		})
 	})
 })

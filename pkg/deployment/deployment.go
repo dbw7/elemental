@@ -18,6 +18,7 @@ limitations under the License.
 package deployment
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -49,6 +50,25 @@ const (
 type MiB uint64
 
 const (
+	partitionAlignment        MiB = 128
+	filesystemOverheadPercent MiB = 8
+	filesystemFixedHeadroom   MiB = 256
+	btrfsMinHeadroom          MiB = 768
+)
+
+// PartitionSizeFor returns a rough calculation of enough size for the necessary contents to be
+// such as the files and metadata to able to fit on a given filesystem. This is important for large
+// airgap systems on varying filesystem types where "no space left on device errors may occur"
+func PartitionSizeFor(content MiB, fs FileSystem) MiB {
+	headroom := content*filesystemOverheadPercent/100 + filesystemFixedHeadroom
+	if fs == Btrfs {
+		headroom = max(headroom, btrfsMinHeadroom)
+	}
+	size := content + headroom
+	return (size + partitionAlignment - 1) / partitionAlignment * partitionAlignment
+}
+
+const (
 	EfiLabel     = "EFI"
 	EfiMnt       = "/boot"
 	EfiSize  MiB = 1024
@@ -63,9 +83,9 @@ const (
 	SystemMnt            = "/"
 	AllAvailableSize MiB = 0
 
-	IgnitionLabel = "ignition"
-	CatalystLabel = "CATALYST"
-	ConfigMnt     = "/run/elemental/firstboot"
+	IgnitionLabel   = "ignition"
+	CombustionLabel = "COMBUSTION"
+	ConfigMnt       = "/run/elemental/firstboot"
 
 	deploymentFile = "/etc/elemental/deployment.yaml"
 
@@ -970,11 +990,21 @@ func Parse(s *sys.System, root string) (*Deployment, error) {
 		return nil, fmt.Errorf("reading deployment file '%s': %w", path, err)
 	}
 	d := &Deployment{}
-	err = yaml.Unmarshal(data, d)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	err = dec.Decode(d)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshalling deployment file '%s': %w: %s", path, err, string(data))
 	}
 	return d, nil
+}
+
+func (p *Partition) MountRWVolumesInInitrd() {
+	for i := range p.RWVolumes {
+		if !slices.Contains(p.RWVolumes[i].MountOpts, initrdMnt) {
+			p.RWVolumes[i].MountOpts = append(p.RWVolumes[i].MountOpts, initrdMnt)
+		}
+	}
 }
 
 // DefaultDeployment returns the simplest deployment setup in a single
@@ -1001,7 +1031,10 @@ func DefaultDeployment() *Deployment {
 						{Path: "/var", NoCopyOnWrite: true, MountOpts: []string{initrdMnt}},
 						{Path: "/root", MountOpts: []string{initrdMnt}},
 						{Path: "/etc", Snapshotted: true, MountOpts: []string{initrdMnt}},
-						{Path: "/opt"}, {Path: "/srv"}, {Path: "/home"}, {Path: "/usr/local"},
+						{Path: "/opt", MountOpts: []string{initrdMnt}},
+						{Path: "/srv", MountOpts: []string{initrdMnt}},
+						{Path: "/home", MountOpts: []string{initrdMnt}},
+						{Path: "/usr/local", MountOpts: []string{initrdMnt}},
 					},
 				},
 			},
@@ -1043,16 +1076,14 @@ func WithPartitions(num int, parts ...*Partition) Opt {
 
 // WithConfigPartition inserts a configuration partition as the second partition
 // to the systemd disk. The given size is the amount of data expected to store in
-// the partition, then the partition is sized to be aligned with 128MiB and to ensure
-// at least 128MiB of free space is available.
+// the partition, see PartitionSizeFor.
 func WithConfigPartition(size MiB, label string) Opt {
-	size = (size/128)*128 + 256
 	part := &Partition{
 		Label:      label,
 		MountPoint: ConfigMnt,
 		Role:       Config,
 		FileSystem: Ext4,
-		Size:       size,
+		Size:       PartitionSizeFor(size, Ext4),
 		Hidden:     true,
 	}
 	return WithPartitions(1, part)
@@ -1060,15 +1091,13 @@ func WithConfigPartition(size MiB, label string) Opt {
 
 // WithRecoveryPartition inserts a recovery partition as the second partition
 // to the systemd disk. The given size is the amount of data expected to store in
-// the partition, then the partition is sized to be aligned with 128MiB and to ensure
-// at least 128MiB of free space is available.
+// the partition.
 func WithRecoveryPartition(size MiB) Opt {
-	size = (size/128)*128 + 256
 	part := &Partition{
 		Label:      RecoveryLabel,
 		Role:       Recovery,
 		FileSystem: Ext4,
-		Size:       size,
+		Size:       PartitionSizeFor(size, Ext4),
 		Hidden:     true,
 	}
 	return WithPartitions(1, part)

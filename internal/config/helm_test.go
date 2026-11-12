@@ -18,6 +18,7 @@ limitations under the License.
 package config
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
@@ -92,6 +93,13 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 								Namespace:  "endpoint-copier-operator",
 								Repository: "suse-core-oci",
 							},
+							{
+								Name:       "Elemental Lifecycle Manager",
+								Chart:      "elemental-lifecycle-manager",
+								Version:    "0.1.1",
+								Namespace:  "elemental-system",
+								Repository: "suse-core-oci",
+							},
 						},
 						Repositories: []*api.HelmRepository{
 							{
@@ -149,7 +157,8 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 		}
 
 		It("Fails resolving values of core Helm chart", func() {
-			resolver := &valuesResolverMock{Err: fmt.Errorf("resolving failed")}
+			// the first call is the evaluation of LCM dependencies
+			resolver := &valuesResolverMock{Err: fmt.Errorf("resolving failed"), SuccessCount: 1}
 			conf := &image.Configuration{
 				Release: release.Release{
 					Components: release.Components{
@@ -157,6 +166,7 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 							{
 								Name: "metallb", // chart in core release
 							},
+							{Name: "elemental-lifecycle-manager"},
 						},
 					},
 				},
@@ -164,7 +174,7 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 
 			h := &Helm{ValuesResolver: resolver, Logger: logger}
 
-			charts, err := h.Configure(conf, rm, config)
+			charts, err := h.Configure(context.Background(), conf, rm, config)
 			Expect(err).To(HaveOccurred())
 			Expect(err).To(MatchError("retrieving helm charts: collecting helm charts: resolving values for chart metallb: resolving failed"))
 			Expect(charts).To(BeNil())
@@ -172,7 +182,8 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 		})
 
 		It("Fails resolving values of solution Helm chart", func() {
-			resolver := &valuesResolverMock{Err: fmt.Errorf("resolving failed")}
+			// the first call is the evaluation of LCM dependencies
+			resolver := &valuesResolverMock{Err: fmt.Errorf("resolving failed"), SuccessCount: 1}
 			conf := &image.Configuration{
 				Release: release.Release{
 					Components: release.Components{
@@ -180,6 +191,7 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 							{
 								Name: "neuvector", // chart in solution release
 							},
+							{Name: "elemental-lifecycle-manager"},
 						},
 					},
 				},
@@ -187,7 +199,7 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 
 			h := &Helm{ValuesResolver: resolver, Logger: logger}
 
-			charts, err := h.Configure(conf, rm, config)
+			charts, err := h.Configure(context.Background(), conf, rm, config)
 			Expect(err).To(HaveOccurred())
 			Expect(err).To(MatchError("retrieving helm charts: collecting helm charts: resolving values for chart neuvector-crd: resolving failed"))
 			Expect(charts).To(BeNil())
@@ -195,8 +207,14 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 		})
 
 		It("Fails resolving values of user Helm chart", func() {
-			resolver := &valuesResolverMock{Err: fmt.Errorf("resolving failed")}
+			// the successful calls are the evaluation of LCM dependencies and the LCM chart itself
+			resolver := &valuesResolverMock{Err: fmt.Errorf("resolving failed"), SuccessCount: 2}
 			conf := &image.Configuration{
+				Release: release.Release{
+					Components: release.Components{
+						HelmCharts: []release.HelmChart{{Name: "elemental-lifecycle-manager"}},
+					},
+				},
 				Kubernetes: kubernetes.Kubernetes{
 					Helm: &kubernetes.Helm{
 						Charts: []*kubernetes.HelmChart{
@@ -218,9 +236,9 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 				},
 			}
 
-			h := &Helm{ValuesResolver: resolver}
+			h := &Helm{ValuesResolver: resolver, Logger: logger}
 
-			charts, err := h.Configure(conf, rm, config)
+			charts, err := h.Configure(context.Background(), conf, rm, config)
 			Expect(err).To(HaveOccurred())
 			Expect(err).To(MatchError("retrieving helm charts: collecting user helm charts: resolving values for chart apache: resolving failed"))
 			Expect(charts).To(BeNil())
@@ -246,7 +264,7 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 			}
 
 			h := &Helm{ValuesResolver: resolver}
-			charts, err := h.Configure(conf, rm, config)
+			charts, err := h.Configure(context.Background(), conf, rm, config)
 			Expect(err).To(HaveOccurred())
 			Expect(err).To(MatchError("retrieving helm charts: collecting user helm charts: repository not found for chart: apache"))
 			Expect(charts).To(BeNil())
@@ -282,7 +300,7 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 			}
 
 			h := &Helm{ValuesResolver: resolver}
-			charts, err := h.Configure(conf, rm, config)
+			charts, err := h.Configure(context.Background(), conf, rm, config)
 			Expect(err).To(HaveOccurred())
 			Expect(err).To(MatchError("retrieving helm charts: creating helm chart auth map: helm repository 'apache-repo' defined multiple times"))
 			Expect(charts).To(BeNil())
@@ -305,9 +323,9 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 
 			h := &Helm{ValuesResolver: resolver, Logger: logger}
 
-			charts, err := h.Configure(conf, rm, config)
+			charts, err := h.Configure(context.Background(), conf, rm, config)
 			Expect(err).To(HaveOccurred())
-			Expect(err).To(MatchError("retrieving helm charts: filtering enabled helm charts: adding helm chart 'rancher': helm chart does not exist"))
+			Expect(err).To(MatchError("retrieving helm charts: filtering enabled helm charts: adding helm chart 'rancher': helm chart is not defined in the core platform or solution release manifest"))
 			Expect(charts).To(BeNil())
 			Expect(len(config.Storage.Files)).To(Equal(0))
 		})
@@ -333,6 +351,7 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 							{Name: "endpoint-copier-operator"},
 							{Name: "neuvector"},
 							{Name: "kubevirt"},
+							{Name: "elemental-lifecycle-manager"},
 						},
 					},
 				},
@@ -373,7 +392,7 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 				Logger:         logger,
 			}
 
-			charts, err := h.Configure(conf, rm, config)
+			charts, err := h.Configure(context.Background(), conf, rm, config)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(charts).To(ConsistOf(
 				"/helm/metallb.yaml",
@@ -381,10 +400,11 @@ var _ = Describe("Helm tests", Label("helm"), func() {
 				"/helm/neuvector-crd.yaml",
 				"/helm/neuvector.yaml",
 				"/helm/kubevirt.yaml",
+				"/helm/elemental-lifecycle-manager.yaml",
 				"/helm/apache.yaml",
 				"/helm/nginx.yaml"))
 
-			Expect(len(config.Storage.Files)).To(Equal(7))
+			Expect(len(config.Storage.Files)).To(Equal(8))
 
 			// Verify the contents of the various written Helm resources
 			contents := `apiVersion: helm.cattle.io/v1
@@ -536,6 +556,7 @@ spec:
 									Password: "eco-pass",
 								},
 							},
+							{Name: "elemental-lifecycle-manager"},
 						},
 					},
 				},
@@ -608,17 +629,18 @@ spec:
 				Logger:         logger,
 			}
 
-			charts, err := h.Configure(conf, rm, config)
+			charts, err := h.Configure(context.Background(), conf, rm, config)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(charts).To(ConsistOf(
 				"/helm/metallb.yaml",
 				"/helm/endpoint-copier-operator.yaml",
+				"/helm/elemental-lifecycle-manager.yaml",
 				"/helm/apache.yaml",
 				"/helm/nginx.yaml",
 				"/helm/postgres.yaml",
 				"/helm/suse-storage.yaml"))
 
-			Expect(len(config.Storage.Files)).To(Equal(10))
+			Expect(len(config.Storage.Files)).To(Equal(11))
 
 			apacheAuthSecret := "apiVersion: v1\nkind: Secret\nmetadata:\n    namespace: kube-system\n    name: apache-auth\ntype: kubernetes.io/basic-auth\ndata:\n    username: YXBhY2hlLXVzZXI=\n    password: YXBhY2hlLXBhc3M=\n"
 			postgresAuthSecret := "apiVersion: v1\nkind: Secret\nmetadata:\n    namespace: kube-system\n    name: postgres-auth\ntype: kubernetes.io/basic-auth\ndata:\n    username: cG9zdGdyZXMtdXNlcg==\n    password: cG9zdGdyZXMtcGFzcw==\n"
@@ -844,7 +866,7 @@ spec:
 		It("Fails to find non-existing enabled Helm chart", func() {
 			charts, repositories, err := enabledHelmCharts(rm, []release.HelmChart{{Name: "rancher"}}, logger)
 			Expect(err).To(HaveOccurred())
-			Expect(err).To(MatchError("adding helm chart 'rancher': helm chart does not exist"))
+			Expect(err).To(MatchError("adding helm chart 'rancher': helm chart is not defined in the core platform or solution release manifest"))
 			Expect(charts).To(BeNil())
 			Expect(repositories).To(BeNil())
 		})
@@ -852,7 +874,7 @@ spec:
 		It("Fails to find non-existing dependency Helm chart", func() {
 			charts, repositories, err := enabledHelmCharts(rm, []release.HelmChart{{Name: "longhorn"}}, logger)
 			Expect(err).To(HaveOccurred())
-			Expect(err).To(MatchError("adding helm chart 'longhorn': adding dependent helm chart 'longhorn-crd': helm chart does not exist"))
+			Expect(err).To(MatchError("adding helm chart 'longhorn': adding dependent helm chart 'longhorn-crd': helm chart is not defined in the core platform or solution release manifest"))
 			Expect(charts).To(BeNil())
 			Expect(repositories).To(BeNil())
 		})

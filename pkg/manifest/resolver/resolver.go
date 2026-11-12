@@ -21,10 +21,14 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/suse/elemental/v3/pkg/log"
 	"github.com/suse/elemental/v3/pkg/manifest/api/core"
 	"github.com/suse/elemental/v3/pkg/manifest/api/solution"
 	"github.com/suse/elemental/v3/pkg/manifest/source"
+	"github.com/suse/elemental/v3/pkg/semverutil"
 )
+
+var ErrVersionUndefined = errors.New("elemental version undefined")
 
 type ResolvedManifest struct {
 	// Release manifest for the core platform
@@ -46,6 +50,52 @@ func New(reader SourceReader) *Resolver {
 	return &Resolver{
 		sourceReader: reader,
 	}
+}
+
+// CheckElementalVersion checks the resolved manifest uses a compatible Elemental version
+// with the current binary. Major version is required to match and minor version of the
+// core platform in the manifest needs to be equal or minus one compared with the current
+// Elemental version.
+func (rm *ResolvedManifest) CheckElementalVersion(logger log.Logger, currentVersion string) error {
+	if rm.CorePlatform == nil {
+		return nil
+	}
+	mVer, err := rm.GetElementalVersion()
+	if err != nil {
+		return fmt.Errorf("manifest elemental version is not valid or undefined: %w", err)
+	}
+
+	cVer, err := semverutil.Parse(currentVersion)
+	if err != nil {
+		return fmt.Errorf("current version %q is not valid: %w", currentVersion, err)
+	}
+
+	switch {
+	case cVer.Major() != mVer.Major():
+		return fmt.Errorf("major version mismatch. core platform version %q, current elemental version %q", mVer.String(), cVer.String())
+	case mVer.Minor() > cVer.Minor(), mVer.Minor()+1 < cVer.Minor():
+		return fmt.Errorf("incompatible versions. core platform version %q, current elemental version %q", mVer.String(), cVer.String())
+	case cVer.LessThan(mVer):
+		logger.Warn("Current Elemental version %q is lower than the core platform version %q", cVer.String(), mVer.String())
+	}
+
+	return nil
+}
+
+// GetElementalVersion returns the Elemental version defined for the Core Platform. Errors with a ErrVersionUndefined
+// sentinel error variable if not set.
+func (rm *ResolvedManifest) GetElementalVersion() (semverutil.Version, error) {
+	var version semverutil.Version
+	var err error
+	if rm.CorePlatform != nil && rm.CorePlatform.Metadata != nil && rm.CorePlatform.Metadata.Elemental != nil {
+		version, err = semverutil.Parse(rm.CorePlatform.Metadata.Elemental.Version)
+		if err != nil {
+			return version, fmt.Errorf("manifest elemental version %q is not valid: %w", rm.CorePlatform.Metadata.Elemental.Version, err)
+		}
+	} else {
+		return version, ErrVersionUndefined
+	}
+	return version, nil
 }
 
 // Resolve resolves a release manifest at a given uri to its

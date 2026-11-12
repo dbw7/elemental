@@ -21,13 +21,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/urfave/cli/v3"
-)
+	"github.com/suse/elemental/v3/version"
 
-var (
-	version = "v0.0.1"
-	// gitCommit is the git sha1
-	gitCommit = ""
+	"github.com/urfave/cli/v3"
 )
 
 func NewVersionCommand(appName string) *cli.Command {
@@ -37,13 +33,7 @@ func NewVersionCommand(appName string) *cli.Command {
 		Usage:     "Inspect program version",
 		UsageText: fmt.Sprintf("%s version", appName),
 		Action: func(_ context.Context, _ *cli.Command) error {
-			commit := gitCommit
-			if len(commit) > 7 {
-				commit = gitCommit[:7]
-			}
-
-			fmt.Printf("%s+g%s\n", version, commit)
-
+			fmt.Println(version.Version())
 			return nil
 		},
 	}

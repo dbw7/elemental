@@ -29,6 +29,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/suse/elemental/v3/pkg/log"
+	"github.com/suse/elemental/v3/pkg/semverutil"
 	"github.com/suse/elemental/v3/pkg/sys"
 	"github.com/suse/elemental/v3/pkg/sys/vfs"
 )
@@ -36,9 +37,20 @@ import (
 const (
 	tokenKey   = "token"
 	cniKey     = "cni"
+	cniDefault = "canal"
+	noneValue  = "none"
 	serverKey  = "server"
 	tlsSANKey  = "tls-san"
 	selinuxKey = "selinux"
+
+	ingressKey     = "ingress-controller"
+	ingressNginx   = "ingress-nginx"
+	ingressTraefik = "traefik"
+	imageSetCore   = "core"
+	imageListFmt   = "rke2-images-%s.linux-%s.txt"
+
+	traefikDefaultMajor = 1
+	traefikDefaultMinor = 36
 )
 
 type ConfigMap map[string]any
@@ -95,6 +107,81 @@ func NewCluster(s *sys.System, kube *Kubernetes) (*Cluster, error) {
 		AgentConfig:         agentConfig,
 		RegistriesConfig:    registriesConfig,
 	}, err
+}
+
+func ImageListName(set, arch string) string {
+	return fmt.Sprintf(imageListFmt, set, arch)
+}
+
+func ImageSets(config ConfigMap, version string) ([]string, error) {
+	sets := append([]string{imageSetCore}, CNIPlugins(config)...)
+
+	ingress, configured := configList(config, ingressKey)
+	if !configured || len(ingress) == 0 {
+		return sets, nil
+	}
+
+	defaultIngress, err := DefaultIngressController(version)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, name := range ingress {
+		if name != defaultIngress {
+			sets = append(sets, name)
+		}
+	}
+
+	return sets, nil
+}
+
+func DefaultIngressController(version string) (string, error) {
+	v, err := semverutil.Parse(strings.Replace(version, "_", "+", 1))
+	if err != nil {
+		return "", fmt.Errorf("parsing kubernetes version %q: %w", version, err)
+	}
+
+	if v.Major() > traefikDefaultMajor || (v.Major() == traefikDefaultMajor && v.Minor() >= traefikDefaultMinor) {
+		return ingressTraefik, nil
+	}
+
+	return ingressNginx, nil
+}
+
+func CNIPlugins(config ConfigMap) []string {
+	plugins, configured := configList(config, cniKey)
+	if !configured {
+		return []string{cniDefault}
+	}
+
+	return plugins
+}
+
+func configList(config ConfigMap, key string) ([]string, bool) {
+	var names []string
+
+	switch v := config[key].(type) {
+	case string:
+		names = strings.Split(v, ",")
+	case []any:
+		for _, item := range v {
+			if name, ok := item.(string); ok {
+				names = append(names, name)
+			}
+		}
+	default:
+		return nil, false
+	}
+
+	var values []string
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name != "" && name != noneValue {
+			values = append(values, name)
+		}
+	}
+
+	return values, true
 }
 
 func ParseKubernetesConfig(s *sys.System, configFile string) (ConfigMap, error) {

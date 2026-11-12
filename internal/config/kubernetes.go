@@ -20,8 +20,11 @@ package config
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -31,7 +34,9 @@ import (
 	"github.com/suse/elemental/v3/internal/image/kubernetes"
 	"github.com/suse/elemental/v3/internal/template"
 	"github.com/suse/elemental/v3/pkg/manifest/resolver"
+	"github.com/suse/elemental/v3/pkg/semverutil"
 	"github.com/suse/elemental/v3/pkg/sys"
+	"github.com/suse/elemental/v3/pkg/sys/platform"
 	"github.com/suse/elemental/v3/pkg/sys/vfs"
 )
 
@@ -50,6 +55,9 @@ var (
 	//go:embed templates/k8s-config-installer.service.tpl
 	k8sConfigUnitTpl string
 
+	//go:embed templates/k8s-config-legacy-installer.service.tpl
+	k8sConfigLegacyUnitTpl string
+
 	//go:embed templates/k8s-vip.yaml.tpl
 	k8sVIPManifestTpl string
 
@@ -60,22 +68,11 @@ var (
 	k8sConfDeployScriptTpl string
 )
 
-func needsManifestsSetup(conf *image.Configuration) bool {
-	return len(conf.Kubernetes.RemoteManifests) > 0 || len(conf.Kubernetes.LocalManifests) > 0 || conf.Kubernetes.Network.IsManagedInternally()
-}
-
-func needsHelmChartsSetup(conf *image.Configuration) bool {
-	return (len(conf.Release.Components.HelmCharts) > 0) || conf.Kubernetes.Helm != nil
-}
-
-func isKubernetesEnabled(conf *image.Configuration) bool {
-	return conf.Release.Components.Kubernetes != nil || needsHelmChartsSetup(conf) || needsManifestsSetup(conf)
-}
-
 func (m *Manager) configureKubernetes(
 	ctx context.Context,
 	conf *image.Configuration,
 	manifest *resolver.ResolvedManifest,
+	output Output,
 	butaneCfg *butane.Config,
 ) (err error) {
 	if manifest == nil ||
@@ -85,24 +82,43 @@ func (m *Manager) configureKubernetes(
 		return fmt.Errorf("kubernetes release not found")
 	}
 
+	version, err := manifest.GetElementalVersion()
+	if err != nil {
+		m.system.Logger().Warn("elemental version in core platform undefined: %s", err.Error())
+	}
+
 	var runtimeHelmCharts []string
 
-	if needsHelmChartsSetup(conf) {
+	if conf.NeedsHelmChartsSetup() {
 		m.system.Logger().Info("Configuring Helm charts")
 
-		runtimeHelmCharts, err = m.helm.Configure(conf, manifest, butaneCfg)
+		runtimeHelmCharts, err = m.helm.Configure(ctx, conf, manifest, butaneCfg)
 		if err != nil {
 			return fmt.Errorf("configuring helm charts: %w", err)
 		}
 	}
 
 	var runtimeManifestsDir string
-	if needsManifestsSetup(conf) {
+	if conf.NeedsManifestsSetup() {
 		m.system.Logger().Info("Configuring Kubernetes manifests")
 
-		runtimeManifestsDir, err = m.setupManifests(ctx, &conf.Kubernetes, butaneCfg)
+		runtimeManifestsDir, err = m.setupManifests(ctx, &conf.Kubernetes, output, butaneCfg)
 		if err != nil {
 			return fmt.Errorf("configuring kubernetes manifests: %w", err)
+		}
+	}
+
+	if conf.Kubernetes.ElementalEmbeddedRegistry != nil && !m.airgap {
+		return fmt.Errorf("elementalEmbeddedRegistry is configured but the --airgap flag is not present")
+	}
+
+	var mirrorHosts []string
+	if m.airgap {
+		m.system.Logger().Info("Configuring elemental embedded registry")
+
+		mirrorHosts, err = m.configureElementalRegistry(ctx, conf, manifest, output, butaneCfg)
+		if err != nil {
+			return fmt.Errorf("configuring elemental embedded registry: %w", err)
 		}
 	}
 
@@ -121,16 +137,9 @@ func (m *Manager) configureKubernetes(
 		}
 	}
 
-	if len(runtimeHelmCharts) > 0 || runtimeManifestsDir != "" {
-		err = appendK8sResDeployScript(butaneCfg, runtimeManifestsDir, runtimeHelmCharts)
-		if err != nil {
-			return fmt.Errorf("generating kubernetes resource deployment script: %w", err)
-		}
-
-		err = appendK8sResUnit(butaneCfg, initNode)
-		if err != nil {
-			return fmt.Errorf("generating kubernetes resource deployment unit: %w", err)
-		}
+	err = appendK8sResources(butaneCfg, runtimeManifestsDir, runtimeHelmCharts, initNode)
+	if err != nil {
+		return err
 	}
 
 	err = appendK8sConfigDeployScript(butaneCfg, conf.Kubernetes, initNode)
@@ -138,7 +147,7 @@ func (m *Manager) configureKubernetes(
 		return fmt.Errorf("generating kubernetes config deployment script: %w", err)
 	}
 
-	err = appendRke2Configuration(m.system, butaneCfg, &conf.Kubernetes)
+	err = appendRke2Configuration(m.system, butaneCfg, &conf.Kubernetes, mirrorHosts, version)
 	if err != nil {
 		return fmt.Errorf("generating RKE2 configuration: %w", err)
 	}
@@ -146,22 +155,50 @@ func (m *Manager) configureKubernetes(
 	return nil
 }
 
-func (m *Manager) setupManifests(ctx context.Context, k *kubernetes.Kubernetes, butaneCfg *butane.Config) (string, error) {
+func appendK8sResources(butaneCfg *butane.Config, manifestsDir string, helmCharts []string, initNode *kubernetes.Node) error {
+	if len(helmCharts) == 0 && manifestsDir == "" {
+		return nil
+	}
+
+	if err := appendK8sResDeployScript(butaneCfg, manifestsDir, helmCharts); err != nil {
+		return fmt.Errorf("generating kubernetes resource deployment script: %w", err)
+	}
+
+	if err := appendK8sResUnit(butaneCfg, initNode); err != nil {
+		return fmt.Errorf("generating kubernetes resource deployment unit: %w", err)
+	}
+
+	return nil
+}
+
+func (m *Manager) setupManifests(ctx context.Context, k *kubernetes.Kubernetes, output Output, butaneCfg *butane.Config) (string, error) {
 	fs := m.system.FS()
 
 	relativeManifestsPath := filepath.Join("/", image.KubernetesManifestsPath())
 
-	for _, manifest := range k.RemoteManifests {
-		targetPath := filepath.Join(relativeManifestsPath, filepath.Base(manifest))
-
-		rc, err := m.downloader.URLBody(ctx, manifest)
-		if err != nil {
-			return "", fmt.Errorf("downloading remote Kubernetes manifest '%s': %w", manifest, err)
+	if len(k.RemoteManifests) > 0 {
+		storeDir := output.RemoteManifestsStoreDir()
+		if err := vfs.MkdirAll(fs, storeDir, vfs.DirPerm); err != nil {
+			return "", fmt.Errorf("creating remote manifests directory: %w", err)
 		}
 
-		err = butaneCfg.AddFileInlineFromReader(targetPath, rc, 0o644)
-		if err != nil {
-			return "", fmt.Errorf("reading contents for manifest %q: %w", manifest, err)
+		for i, manifest := range k.RemoteManifests {
+			targetPath := filepath.Join(relativeManifestsPath, filepath.Base(manifest))
+			localPath := filepath.Join(storeDir, fmt.Sprintf("manifest-%d.yaml", i))
+
+			if err := m.downloadFile(ctx, manifest, localPath); err != nil {
+				return "", fmt.Errorf("downloading remote Kubernetes manifest '%s': %w", manifest, err)
+			}
+
+			mfst, err := fs.Open(localPath)
+			if err != nil {
+				return "", fmt.Errorf("opening downloaded manifest %q: %w", manifest, err)
+			}
+
+			err = butaneCfg.AddFileInlineFromReader(targetPath, mfst, 0o644)
+			if err != nil {
+				return "", fmt.Errorf("reading contents for manifest %q: %w", manifest, err)
+			}
 		}
 	}
 
@@ -273,7 +310,11 @@ func generateK8sResourcesUnit(deployScript string, initNode *kubernetes.Node) (s
 	return data, nil
 }
 
-func generateK8sConfigUnit(deployScript string) (string, error) {
+func generateK8sConfigUnit(deployScript string, version semverutil.Version) (string, error) {
+	const threshold = "3.1.0"
+	var data string
+	var err error
+
 	values := struct {
 		ConfigDeployScript string
 		RuntimeEnvPath     string
@@ -282,7 +323,12 @@ func generateK8sConfigUnit(deployScript string) (string, error) {
 		RuntimeEnvPath:     filepath.Join("/", image.RuntimeEnvPath()),
 	}
 
-	data, err := template.Parse(k8sConfigUnitName, k8sConfigUnitTpl, &values)
+	thresholdVersion, _ := semverutil.Parse(threshold)
+	if version.LessThan(thresholdVersion) {
+		data, err = template.Parse(k8sConfigUnitName, k8sConfigLegacyUnitTpl, &values)
+	} else {
+		data, err = template.Parse(k8sConfigUnitName, k8sConfigUnitTpl, &values)
+	}
 	if err != nil {
 		return "", fmt.Errorf("parsing config unit template: %w", err)
 	}
@@ -301,7 +347,7 @@ func kubernetesVIPManifest(k *kubernetes.Kubernetes) (string, error) {
 	return template.Parse("k8s-vip", k8sVIPManifestTpl, &vars)
 }
 
-func appendRke2Configuration(s *sys.System, butaneCfg *butane.Config, k *kubernetes.Kubernetes) error {
+func appendRke2Configuration(s *sys.System, butaneCfg *butane.Config, k *kubernetes.Kubernetes, mirrorHosts []string, manifestVersion semverutil.Version) error {
 	configScript := filepath.Join("/", image.KubernetesPath(), k8sConfDeployScriptName)
 
 	c, err := kubernetes.NewCluster(s, k)
@@ -309,7 +355,11 @@ func appendRke2Configuration(s *sys.System, butaneCfg *butane.Config, k *kuberne
 		return fmt.Errorf("failed parsing cluster: %w", err)
 	}
 
-	k8sConfigUnit, err := generateK8sConfigUnit(configScript)
+	if len(mirrorHosts) > 0 {
+		addRegistryMirrors(c.RegistriesConfig, mirrorHosts, registryPort)
+	}
+
+	k8sConfigUnit, err := generateK8sConfigUnit(configScript, manifestVersion)
 	if err != nil {
 		return fmt.Errorf("failed generating k8s config unit: %w", err)
 	}
@@ -398,4 +448,109 @@ func (m *Manager) unpackKubernetesArtifacts(ctx context.Context, manifest *resol
 	}
 
 	return nil
+}
+
+func (m *Manager) kubernetesImages(rm *resolver.ResolvedManifest, conf *image.Configuration, output Output) ([]string, error) {
+	k8s := rm.CorePlatform.Components.Kubernetes
+	if k8s == nil {
+		return nil, nil
+	}
+
+	serverConfig, err := kubernetes.ParseKubernetesConfig(m.system, conf.Kubernetes.Config.ServerFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("parsing server config: %w", err)
+	}
+
+	selected, err := kubernetes.ImageSets(serverConfig, k8s.Version)
+	if err != nil {
+		return nil, fmt.Errorf("selecting kubernetes image sets: %w", err)
+	}
+
+	platform, err := platform.Parse(m.platform)
+	if err != nil {
+		return nil, fmt.Errorf("parsing platform %q: %w", m.platform, err)
+	}
+
+	fs := m.system.FS()
+	installDir := filepath.Join(output.OverlaysDir(), image.KubernetesInstallPath())
+
+	var images []string
+	for _, name := range selected {
+		listName := kubernetes.ImageListName(name, platform.GolangArch)
+
+		list, err := readImageList(fs, filepath.Join(installDir, listName))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("kubernetes image set %q is not shipped by %s: %s not found, available: %s", name, k8s.Image, listName, strings.Join(shippedImageSets(fs, installDir, platform.GolangArch), ", "))
+		} else if err != nil {
+			return nil, fmt.Errorf("reading kubernetes image set %q: %w", name, err)
+		}
+
+		if len(list) == 0 {
+			return nil, fmt.Errorf("kubernetes image set %q is empty: %s lists no images", name, listName)
+		}
+
+		m.system.Logger().Info("Embedding kubernetes image set %q from %s", name, listName)
+		images = append(images, list...)
+	}
+
+	return images, nil
+}
+
+func shippedImageSets(fs vfs.FS, installDir, arch string) []string {
+	pattern := kubernetes.ImageListName("*", arch)
+
+	lists, _ := vfs.FindFiles(fs, installDir, pattern)
+
+	prefix, suffix, _ := strings.Cut(pattern, "*")
+	sets := make([]string, 0, len(lists))
+	for _, list := range lists {
+		name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(list), prefix), suffix)
+		sets = append(sets, name)
+	}
+
+	slices.Sort(sets)
+	return sets
+}
+
+func readImageList(fs vfs.FS, path string) ([]string, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var images []string
+	for line := range strings.Lines(string(data)) {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		images = append(images, line)
+	}
+
+	return images, nil
+}
+
+func addRegistryMirrors(registries kubernetes.ConfigMap, hosts []string, port string) {
+	embedded := fmt.Sprintf("http://localhost:%s", port)
+
+	mirrors := nestedConfigMap(registries, "mirrors")
+	for _, host := range hosts {
+		mirror := nestedConfigMap(mirrors, host)
+		endpoints, _ := mirror["endpoint"].([]any)
+		mirror["endpoint"] = append([]any{embedded}, endpoints...)
+	}
+}
+
+func nestedConfigMap(parent map[string]any, key string) map[string]any {
+	switch child := parent[key].(type) {
+	case kubernetes.ConfigMap:
+		return child
+	case map[string]any:
+		return child
+	}
+
+	child := kubernetes.ConfigMap{}
+	parent[key] = child
+	return child
 }

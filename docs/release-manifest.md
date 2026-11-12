@@ -40,6 +40,7 @@ components:
       version: "2.11.1"
       namespace: "cattle-system"
       repository: "rancher"
+      priorityUpgrade: true
       values:
         replicas: 1
       dependsOn:
@@ -70,6 +71,7 @@ components:
       * `namespace` - Optional; Namespace where the Helm chart will be deployed. Defaults to the `default` namespace.
       * `values` - Optional; Custom Helm chart values.
       * `dependsOn` - Optional; Defines any chart dependencies that this chart has. Any dependency charts will be deployed before the actual chart.
+      * `priorityUpgrade` - Optional; Defines whether the chart, together with its dependencies, is upgraded before the full upgrade workflow runs. Requires manifest schema `v1`.
       * `images` - Optional; Defines images that this chart utilizes.
         * `name` - Required; Reference name for the specified image.
         * `image` - Required; Location of the container image that this chart utilizes.
@@ -142,4 +144,4 @@ This reference focuses only on the unique to the Core Platform component APIs. A
       * `required` - Whether this extension should be included by default or not. If omitted defaults to `false`.
   * `kubernetes` - Kubernetes distribution related components.
     * `version` - Required; Kubernetes distribution version to be installed (e.g., `v1.35.0+rke2r1`).
-    * `image` - Required; OCI image reference containing all distribution artifacts required for installation. The image should contain the installation script, distribution binaries, container image archives (e.g., CNI-specific images for air-gapped deployments), checksums file, and any other necessary artifacts.
+    * `image` - Required; OCI image reference containing all distribution artifacts required for installation. The image should contain the installation script, distribution binaries, checksums file, and any other necessary artifacts.
