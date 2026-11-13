@@ -61,6 +61,79 @@ type link struct {
 	Path string
 }
 
+func CreateTar(ctx context.Context, s *sys.System, sourceDir, target string) (err error) {
+	file, err := s.FS().OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, vfs.FilePerm)
+	if err != nil {
+		return fmt.Errorf("creating archive %s: %w", target, err)
+	}
+	defer func() {
+		err = errors.Join(err, file.Close())
+	}()
+
+	tw := tar.NewWriter(file)
+	defer func() {
+		err = errors.Join(err, tw.Close())
+	}()
+
+	return vfs.WalkDirFs(s.FS(), sourceDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == sourceDir {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("stop writing tar, context cancelled")
+		default:
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		var linkTarget string
+		if info.Mode()&os.ModeSymlink != 0 {
+			if linkTarget, err = s.FS().Readlink(path); err != nil {
+				return fmt.Errorf("reading symlink %s: %w", path, err)
+			}
+		}
+
+		header, err := tar.FileInfoHeader(info, linkTarget)
+		if err != nil {
+			return fmt.Errorf("creating tar header for %s: %w", path, err)
+		}
+
+		if header.Name, err = filepath.Rel(sourceDir, path); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			header.Name += "/"
+		}
+
+		if err = tw.WriteHeader(header); err != nil {
+			return fmt.Errorf("writing tar header for %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+
+		src, err := s.FS().Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+
+		if _, err = io.Copy(tw, newCancelableReader(ctx, src)); err != nil {
+			return fmt.Errorf("writing %s to tar: %w", path, err)
+		}
+
+		return nil
+	})
+}
+
 // ExtractTarball extracts a .tar, .tar.gz or .tar.bz2 taball file to the given target.
 // Compression detection is rudimentary and only based on file name extension.
 func ExtractTarball(ctx context.Context, s *sys.System, tarball string, target string, filters ...Filter) error {

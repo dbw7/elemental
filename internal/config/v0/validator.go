@@ -29,6 +29,7 @@ import (
 
 	"github.com/suse/elemental/v3/internal/image"
 	"github.com/suse/elemental/v3/internal/image/install"
+	"github.com/suse/elemental/v3/internal/image/kubernetes"
 	"github.com/suse/elemental/v3/internal/image/release"
 )
 
@@ -45,6 +46,7 @@ func getValidator() *validator.Validate {
 		_ = validate.RegisterValidation("disksize", validateDiskSize)
 		_ = validate.RegisterValidation("netbooturl", validateNetbootURL)
 		_ = validate.RegisterValidation("lcmrequired", validateLifecycleManager)
+		_ = validate.RegisterValidation("payloadsource", validatePayloadSource)
 	})
 	return validate
 }
@@ -61,6 +63,11 @@ func validateNetbootURL(fl validator.FieldLevel) bool {
 	default:
 		return false
 	}
+}
+
+func validatePayloadSource(fl validator.FieldLevel) bool {
+	payload, ok := fl.Field().Interface().(kubernetes.PayloadSource)
+	return ok && payload.IsValid()
 }
 
 func validateDiskSize(fl validator.FieldLevel) bool {
@@ -115,6 +122,8 @@ func Validate(conf *image.Configuration) error {
 				messages = append(messages, fmt.Sprintf("field %q must be an http, https, or nfs URL, but got %q", vErr.Namespace(), vErr.Value()))
 			case "hostname":
 				messages = append(messages, fmt.Sprintf("field %q must be a valid hostname, but got %q", vErr.Namespace(), vErr.Value()))
+			case "payloadsource":
+				messages = append(messages, fmt.Sprintf("field %q must be an http or https URL or LABEL=<filesystem label>, but got %q", vErr.Namespace(), vErr.Value()))
 			case "lcmrequired":
 				messages = append(messages, fmt.Sprintf("chart %q must be listed under components.helm in release.yaml when Kubernetes is enabled", elementalLifecycleManager))
 			default:

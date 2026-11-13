@@ -116,6 +116,27 @@ var _ = Describe("Archive", Label("archive"), func() {
 		Expect(ok).To(BeFalse())
 	})
 
+	It("Creates a tar that extracts back to the same tree", func() {
+		Expect(vfs.MkdirAll(tfs, "/payload/registry/blobs", vfs.DirPerm)).To(Succeed())
+		Expect(tfs.WriteFile("/payload/registry/blobs/data", []byte("blob"), 0o600)).To(Succeed())
+		Expect(tfs.WriteFile("/payload/index.json", []byte("{}"), vfs.FilePerm)).To(Succeed())
+		Expect(tfs.Symlink("index.json", "/payload/link")).To(Succeed())
+
+		Expect(archive.CreateTar(context.Background(), s, "/payload", "/data/payload.tar")).To(Succeed())
+
+		Expect(archive.ExtractTarball(context.Background(), s, "/data/payload.tar", "/root")).To(Succeed())
+		Expect(tfs.ReadFile("/root/registry/blobs/data")).To(Equal([]byte("blob")))
+		info, err := tfs.Lstat("/root/registry/blobs/data")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o600)))
+		Expect(tfs.Readlink("/root/link")).To(Equal("index.json"))
+		Expect(vfs.Exists(tfs, "/root/payload")).To(BeFalse())
+	})
+
+	It("fails to create a tar from a missing directory", func() {
+		Expect(archive.CreateTar(context.Background(), s, "/missing", "/data/missing.tar")).NotTo(Succeed())
+	})
+
 	It("fails to extract files of wrong type", func() {
 		Expect(archive.ExtractTarball(context.Background(), s, "/data/test.tar", "/root")).NotTo(Succeed())
 		Expect(archive.ExtractTarball(context.Background(), s, "/data/test.tar.bz2", "/root")).NotTo(Succeed())

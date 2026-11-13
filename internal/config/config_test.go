@@ -26,12 +26,35 @@ import (
 	"github.com/suse/elemental/v3/internal/config"
 	v0 "github.com/suse/elemental/v3/internal/config/v0"
 	sysmock "github.com/suse/elemental/v3/pkg/sys/mock"
+	"github.com/suse/elemental/v3/pkg/sys/vfs"
 )
 
 var _ = Describe("Output", func() {
 	It("InitrdExtensionFile returns the CPIO path relative to RootPath", func() {
 		output := config.Output{RootPath: "/my/root"}
 		Expect(output.InitrdExtensionFile()).To(Equal(filepath.Join("/my/root", "initrdExt.cpio")))
+	})
+
+	It("RegistryDir points into the overlays unless a payload path is set", func() {
+		output := config.Output{RootPath: "/my/root"}
+		Expect(output.RegistryDir()).To(Equal("/my/root/overlays/var/lib/elemental/registry"))
+
+		output.PayloadPath = "/my/image-payload"
+		Expect(output.RegistryDir()).To(Equal("/my/image-payload"))
+	})
+
+	It("NewOutput creates the configuration directory but leaves the payload to its producer", func() {
+		fs, cleanup, err := sysmock.TestFS(nil)
+		Expect(err).ToNot(HaveOccurred())
+		defer cleanup()
+
+		output, err := config.NewOutput(fs, "/work", "/out/image-config", "/out/image-payload")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(output.ConfigPath).To(Equal("/out/image-config"))
+		Expect(output.PayloadPath).To(Equal("/out/image-payload"))
+		Expect(vfs.IsDir(fs, "/work")).To(BeTrue())
+		Expect(vfs.IsDir(fs, "/out/image-config")).To(BeTrue())
+		Expect(vfs.Exists(fs, "/out/image-payload")).To(BeFalse())
 	})
 })
 

@@ -50,7 +50,13 @@ func Customize(ctx context.Context, cmd *cli.Command) error {
 	fs := system.FS()
 	args := &cmdpkg.CustomizeArgs
 
-	imagePath, configPath := resolveOutputPaths(fs, args)
+	conf, err := config.Parse(fs, args.ConfigDir)
+	if err != nil {
+		logger.Error("Parsing configuration directory failed")
+		return fmt.Errorf("parsing configuration directory %s: %w", args.ConfigDir, err)
+	}
+
+	imagePath, configPath, payloadPath := resolveOutputPaths(fs, args, conf)
 	if imagePathExists, err := vfs.Exists(fs, imagePath); err == nil && imagePathExists {
 		logger.Error("Output image path %s already exists, will not overwrite", imagePath)
 		return fmt.Errorf("output image path %s already exists", imagePath)
@@ -64,7 +70,7 @@ func Customize(ctx context.Context, cmd *cli.Command) error {
 
 	logger.Info("Customizing image at %s", imagePath)
 
-	output, err := config.NewOutput(fs, "", configPath)
+	output, err := config.NewOutput(fs, "", configPath, payloadPath)
 	if err != nil {
 		logger.Error("Creating working directory failed")
 		return err
@@ -77,7 +83,7 @@ func Customize(ctx context.Context, cmd *cli.Command) error {
 		}
 	}()
 
-	def, err := digestCustomizeDefinition(fs, args, imagePath, overlayPaths)
+	def, err := digestCustomizeDefinition(args, conf, imagePath, overlayPaths)
 	if err != nil {
 		logger.Error("Digesting image definition from customize flags failed")
 		return err
@@ -100,7 +106,7 @@ func Customize(ctx context.Context, cmd *cli.Command) error {
 	return nil
 }
 
-func resolveOutputPaths(fs vfs.FS, args *cmdpkg.CustomizeFlags) (imagePath, configPath string) {
+func resolveOutputPaths(fs vfs.FS, args *cmdpkg.CustomizeFlags, conf *image.Configuration) (imagePath, configPath, payloadPath string) {
 	imagePath = args.OutputPath
 	imageName := fmt.Sprintf("image-%s.%s", time.Now().UTC().Format("2006-01-02T15-04-05"), args.MediaType)
 	if imagePath == "" {
@@ -109,14 +115,18 @@ func resolveOutputPaths(fs vfs.FS, args *cmdpkg.CustomizeFlags) (imagePath, conf
 		imagePath = filepath.Join(imagePath, imageName)
 	}
 
-	if args.Mode == "split" {
-		imagePathBase := filepath.Base(imagePath)
-		baseName := strings.TrimSuffix(imagePathBase, filepath.Ext(imagePathBase))
+	imagePathBase := filepath.Base(imagePath)
+	baseName := filepath.Join(filepath.Dir(imagePath), strings.TrimSuffix(imagePathBase, filepath.Ext(imagePathBase)))
 
-		configPath = filepath.Join(filepath.Dir(imagePath), baseName+"-config")
+	if args.Mode == "split" {
+		configPath = baseName + "-config"
 	}
 
-	return imagePath, configPath
+	if registry := conf.Kubernetes.ElementalEmbeddedRegistry; registry != nil && registry.Payload != "" {
+		payloadPath = baseName + "-payload"
+	}
+
+	return imagePath, configPath, payloadPath
 }
 
 // resolveOverlayPaths maps the given overlay names to '<name>.qcow2' files placed next to the
@@ -253,15 +263,10 @@ func setupFileExtractor(ctx context.Context, s *sys.System, outDir config.Output
 	)
 }
 
-func digestCustomizeDefinition(f vfs.FS, args *cmdpkg.CustomizeFlags, imagePath string, overlays []string) (*image.Definition, error) {
+func digestCustomizeDefinition(args *cmdpkg.CustomizeFlags, conf *image.Configuration, imagePath string, overlays []string) (*image.Definition, error) {
 	p, err := platform.Parse(args.Platform)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing platform %s", args.Platform)
-	}
-
-	conf, err := config.Parse(f, args.ConfigDir)
-	if err != nil {
-		return nil, fmt.Errorf("parsing configuration directory %s: %w", args.ConfigDir, err)
 	}
 
 	return &image.Definition{

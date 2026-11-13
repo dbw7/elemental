@@ -19,6 +19,8 @@ package kubernetes
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/suse/elemental/v3/internal/image/auth"
 	"github.com/suse/elemental/v3/pkg/helm"
@@ -46,6 +48,33 @@ type Kubernetes struct {
 type ElementalEmbeddedRegistry struct {
 	ContainerImages []ContainerImage `yaml:"containerImages,omitempty" validate:"dive"`
 	Registries      []Registry       `yaml:"registries,omitempty" validate:"dive"`
+	Payload         PayloadSource    `yaml:"payload,omitempty" validate:"omitempty,payloadsource"`
+}
+
+type PayloadSource string
+
+const payloadLabelPrefix = "LABEL="
+
+func (p PayloadSource) IsURL() bool {
+	u, err := url.Parse(string(p))
+	if err != nil || u.Host == "" {
+		return false
+	}
+
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p PayloadSource) IsLabel() bool {
+	return strings.HasPrefix(string(p), payloadLabelPrefix) && len(p) > len(payloadLabelPrefix)
+}
+
+func (p PayloadSource) IsValid() bool {
+	return p.IsURL() || p.IsLabel()
 }
 
 type ContainerImage struct {

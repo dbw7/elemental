@@ -244,6 +244,36 @@ data:
 		Expect(*unit).To(ContainSubstring("--store /var/lib/elemental/registry/store"))
 		Expect(*unit).To(ContainSubstring("--directory /var/lib/elemental/registry/registry"))
 		Expect(*unit).To(ContainSubstring("--port 6545"))
+		Expect(*unit).To(ContainSubstring("TimeoutStartSec=300"))
+		Expect(*unit).NotTo(ContainSubstring("ExecStartPre"))
+		Expect(findFileContentsInConfig(butaneCfg, "/var/lib/elemental/registry-payload.sh")).To(BeNil())
+	})
+
+	It("Writes the registry content as a payload the node fetches at boot", func() {
+		output.PayloadPath = "/_out/image-payload"
+		conf.Kubernetes.ElementalEmbeddedRegistry.Payload = "https://server/image-payload.tar"
+		m := NewManager(system, &helmConfiguratorMock{}, WithImageStore(store), WithPlatform("linux/arm64"))
+
+		_, err := m.configureElementalRegistry(context.Background(), conf, rm, output, butaneCfg)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(store.exported).To(Equal([]string{filepath.Join(output.RegistryStoreDir(), "store"), "/_out/image-payload/registry"}))
+		Expect(store.stores).To(Equal([]string{"/_out/image-payload/store"}))
+		Expect(vfs.Exists(fs, registryDir)).To(BeFalse())
+		Expect(vfs.Exists(fs, filepath.Join(output.OverlaysDir(), image.RegistryBinaryPath()))).To(BeTrue())
+
+		unit := findUnit("elemental-registry.service")
+		Expect(unit).NotTo(BeNil())
+		Expect(*unit).To(ContainSubstring("After=network-online.target"))
+		Expect(*unit).To(ContainSubstring("ExecStartPre=/bin/bash /var/lib/elemental/registry-payload.sh"))
+		Expect(*unit).To(ContainSubstring("--directory /var/lib/elemental/registry/registry"))
+		Expect(*unit).To(ContainSubstring("TimeoutStartSec=3600"))
+
+		script := findFileContentsInConfig(butaneCfg, "/var/lib/elemental/registry-payload.sh")
+		Expect(script).NotTo(BeNil())
+		Expect(*script).To(ContainSubstring(`REGISTRY_DIR="/var/lib/elemental/registry"`))
+		Expect(*script).To(ContainSubstring(`PAYLOAD="https://server/image-payload.tar"`))
+		Expect(*script).To(ContainSubstring(`elm.payload=*) PAYLOAD="${arg#elm.payload=}"`))
 	})
 
 	It("Skips the registry when there are no images to embed", func() {

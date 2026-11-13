@@ -50,6 +50,10 @@ func RegistryPath() string {
 	return filepath.Join(ElementalPath(), "registry")
 }
 
+func RegistryPayloadScriptPath() string {
+	return filepath.Join(ElementalPath(), "registry-payload.sh")
+}
+
 func RegistryBinaryPath() string {
 	return filepath.Join("usr", "local", "libexec", "elemental", "hauler")
 }

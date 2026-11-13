@@ -30,6 +30,7 @@ import (
 	"github.com/suse/elemental/v3/internal/customize"
 	"github.com/suse/elemental/v3/internal/image"
 	"github.com/suse/elemental/v3/internal/image/install"
+	"github.com/suse/elemental/v3/internal/image/kubernetes"
 	"github.com/suse/elemental/v3/pkg/crypto"
 	"github.com/suse/elemental/v3/pkg/deployment"
 	"github.com/suse/elemental/v3/pkg/manifest/api/core"
@@ -510,6 +511,39 @@ disks:
 			{"qemu-img", "create", "-f", "qcow2", "-b", "customized.qcow2", "-F", "qcow2", "/images/node1.qcow2"},
 			{"qemu-img", "create", "-f", "qcow2", "-b", "customized.qcow2", "-F", "qcow2", "/images/node2.qcow2"},
 		})).To(Succeed())
+	})
+
+	It("archives the registry payload when the node downloads it", func() {
+		payloadOutput := config.Output{RootPath: output.RootPath, PayloadPath: "/images/customized-payload"}
+		Expect(vfs.MkdirAll(fs, "/images/customized-payload/registry", vfs.DirPerm)).To(Succeed())
+		Expect(fs.WriteFile("/images/customized-payload/registry/data", []byte("blob"), vfs.FilePerm)).To(Succeed())
+		def := &image.Definition{
+			Image: image.Image{
+				ImageType:       "raw",
+				OutputImageName: "/images/customized.raw",
+			},
+			Configuration: &image.Configuration{
+				Installation: install.Installation{
+					RAW: install.RAW{DiskSize: "20G"},
+				},
+				Kubernetes: kubernetes.Kubernetes{
+					ElementalEmbeddedRegistry: &kubernetes.ElementalEmbeddedRegistry{Payload: "http://server/customized-payload.tar"},
+				},
+			},
+		}
+
+		Expect(customizeRunner.Run(context.Background(), def, payloadOutput)).To(Succeed())
+		Expect(vfs.Exists(fs, "/images/customized-payload")).To(BeFalse())
+		Expect(vfs.Exists(fs, "/images/customized-payload.tar")).To(BeTrue())
+
+		Expect(fs.Remove("/images/customized-payload.tar")).To(Succeed())
+		Expect(customizeRunner.Run(context.Background(), def, payloadOutput)).To(Succeed())
+		Expect(vfs.Exists(fs, "/images/customized-payload.tar")).To(BeFalse())
+
+		def.Configuration.Kubernetes.ElementalEmbeddedRegistry.Payload = "LABEL=PAYLOAD"
+		Expect(vfs.MkdirAll(fs, "/images/customized-payload/registry", vfs.DirPerm)).To(Succeed())
+		Expect(customizeRunner.Run(context.Background(), def, payloadOutput)).To(Succeed())
+		Expect(vfs.IsDir(fs, "/images/customized-payload/registry")).To(BeTrue())
 	})
 
 	It("fails to create overlays for raw media", func() {

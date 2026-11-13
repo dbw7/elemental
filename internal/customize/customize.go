@@ -29,6 +29,7 @@ import (
 	"github.com/suse/elemental/v3/internal/image"
 	"github.com/suse/elemental/v3/internal/image/install"
 	"github.com/suse/elemental/v3/internal/template"
+	"github.com/suse/elemental/v3/pkg/archive"
 	"github.com/suse/elemental/v3/pkg/deployment"
 	"github.com/suse/elemental/v3/pkg/fips"
 	"github.com/suse/elemental/v3/pkg/installer"
@@ -164,8 +165,32 @@ func (r *Runner) Run(ctx context.Context, def *image.Definition, output config.O
 		}
 	}
 
+	if err = r.archivePayload(ctx, def, output); err != nil {
+		logger.Error("Archiving registry payload failed")
+		return err
+	}
+
 	logger.Info("Customize complete")
 	return nil
+}
+
+func (r *Runner) archivePayload(ctx context.Context, def *image.Definition, output config.Output) error {
+	registry := def.Configuration.Kubernetes.ElementalEmbeddedRegistry
+	if output.PayloadPath == "" || registry == nil || !registry.Payload.IsURL() {
+		return nil
+	}
+
+	if exists, _ := vfs.Exists(r.System.FS(), output.PayloadPath); !exists {
+		return nil
+	}
+
+	tarball := output.PayloadPath + ".tar"
+	r.System.Logger().Info("Archiving registry payload to %s", tarball)
+	if err := archive.CreateTar(ctx, r.System, output.PayloadPath, tarball); err != nil {
+		return fmt.Errorf("archiving payload directory %s: %w", output.PayloadPath, err)
+	}
+
+	return r.System.FS().RemoveAll(output.PayloadPath)
 }
 
 func loadISOInstallDesc(s *sys.System, iso, outputDir string) (dep *deployment.Deployment, err error) {

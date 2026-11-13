@@ -32,6 +32,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/suse/elemental/v3/internal/butane"
 	"github.com/suse/elemental/v3/internal/image"
+	"github.com/suse/elemental/v3/internal/image/kubernetes"
 	"github.com/suse/elemental/v3/internal/template"
 	"github.com/suse/elemental/v3/pkg/manifest/resolver"
 	"github.com/suse/elemental/v3/pkg/sys/vfs"
@@ -39,17 +40,25 @@ import (
 )
 
 const (
-	registryUnitName     = "elemental-registry.service"
-	registryPort         = "6545"
-	registryArchiveSufix = "registry.tar.zst"
-	registryStoreDir     = "store"
-	registryBackendDir   = "registry"
-	haulerBinaryName     = "hauler"
-	dockerHubHost        = "docker.io"
+	registryUnitName          = "elemental-registry.service"
+	registryPort              = "6545"
+	registryArchiveSufix      = "registry.tar.zst"
+	registryStoreDir          = "store"
+	registryBackendDir        = "registry"
+	registryPayloadCmdlineKey = "elm.payload"
+	registryStartTimeout      = "300"
+	payloadStartTimeout       = "3600"
+	haulerBinaryName          = "hauler"
+	dockerHubHost             = "docker.io"
 )
 
-//go:embed templates/elemental-registry.service.tpl
-var registryUnitTpl string
+var (
+	//go:embed templates/elemental-registry.service.tpl
+	registryUnitTpl string
+
+	//go:embed templates/elemental-registry-payload.sh.tpl
+	registryPayloadScriptTpl string
+)
 
 func (m *Manager) configureElementalRegistry(ctx context.Context, conf *image.Configuration, rm *resolver.ResolvedManifest, output Output, butaneCfg *butane.Config) ([]string, error) {
 	logger := m.system.Logger()
@@ -65,12 +74,14 @@ func (m *Manager) configureElementalRegistry(ctx context.Context, conf *image.Co
 		return nil, nil
 	}
 
-	registryDir := filepath.Join(output.OverlaysDir(), image.RegistryPath())
+	registryDir := output.RegistryDir()
 	if err = vfs.MkdirAll(fs, registryDir, vfs.DirPerm); err != nil {
 		return nil, fmt.Errorf("creating registry directory: %w", err)
 	}
 
+	var payload kubernetes.PayloadSource
 	if settings := conf.Kubernetes.ElementalEmbeddedRegistry; settings != nil {
+		payload = settings.Payload
 		for _, registry := range settings.Registries {
 			if registry.Credentials == nil {
 				continue
@@ -130,7 +141,7 @@ func (m *Manager) configureElementalRegistry(ctx context.Context, conf *image.Co
 		return nil, fmt.Errorf("setting hauler binary permissions: %w", err)
 	}
 
-	if err = appendRegistryUnit(butaneCfg); err != nil {
+	if err = appendRegistryUnit(butaneCfg, payload); err != nil {
 		return nil, err
 	}
 
@@ -170,19 +181,43 @@ func (m *Manager) embedImage(ctx context.Context, img, platform, archivesDir str
 	})
 }
 
-func appendRegistryUnit(butaneCfg *butane.Config) error {
+func appendRegistryUnit(butaneCfg *butane.Config, payload kubernetes.PayloadSource) error {
 	registryDir := filepath.Join("/", image.RegistryPath())
 
 	unitValues := struct {
-		Hauler   string
-		StoreDir string
-		Backend  string
-		Port     string
+		Hauler          string
+		StoreDir        string
+		Backend         string
+		Port            string
+		PayloadScript   string
+		TimeoutStartSec string
 	}{
-		Hauler:   filepath.Join("/", image.RegistryBinaryPath()),
-		StoreDir: filepath.Join(registryDir, registryStoreDir),
-		Backend:  filepath.Join(registryDir, registryBackendDir),
-		Port:     registryPort,
+		Hauler:          filepath.Join("/", image.RegistryBinaryPath()),
+		StoreDir:        filepath.Join(registryDir, registryStoreDir),
+		Backend:         filepath.Join(registryDir, registryBackendDir),
+		Port:            registryPort,
+		TimeoutStartSec: registryStartTimeout,
+	}
+
+	if payload != "" {
+		scriptValues := struct {
+			RegistryDir string
+			Payload     string
+			CmdlineKey  string
+		}{
+			RegistryDir: registryDir,
+			Payload:     string(payload),
+			CmdlineKey:  registryPayloadCmdlineKey,
+		}
+
+		script, err := template.Parse(image.RegistryPayloadScriptPath(), registryPayloadScriptTpl, &scriptValues)
+		if err != nil {
+			return fmt.Errorf("parsing registry payload script template: %w", err)
+		}
+
+		unitValues.PayloadScript = filepath.Join("/", image.RegistryPayloadScriptPath())
+		unitValues.TimeoutStartSec = payloadStartTimeout
+		butaneCfg.AddFileInline(unitValues.PayloadScript, &script, 0o744)
 	}
 
 	unitData, err := template.Parse(registryUnitName, registryUnitTpl, &unitValues)

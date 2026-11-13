@@ -43,10 +43,11 @@ type Output struct {
 
 	// ConfigPath is only populated if configuration (incl. network, catalyst and custom scripts)
 	// is requested separately. Note that extensions are *always* part of the RootPath instead.
-	ConfigPath string
+	ConfigPath  string
+	PayloadPath string
 }
 
-func NewOutput(fs vfs.FS, rootPath, configPath string) (Output, error) {
+func NewOutput(fs vfs.FS, rootPath, configPath, payloadPath string) (Output, error) {
 	if rootPath == "" {
 		dir, err := vfs.TempDir(fs, "", "work-")
 		if err != nil {
@@ -65,8 +66,9 @@ func NewOutput(fs vfs.FS, rootPath, configPath string) (Output, error) {
 	}
 
 	return Output{
-		RootPath:   rootPath,
-		ConfigPath: configPath,
+		RootPath:    rootPath,
+		ConfigPath:  configPath,
+		PayloadPath: payloadPath,
 	}, nil
 }
 
@@ -80,6 +82,14 @@ func (o Output) FirstbootConfigDir() string {
 	}
 
 	return filepath.Join(o.OverlaysDir(), deployment.ConfigMnt)
+}
+
+func (o Output) RegistryDir() string {
+	if o.PayloadPath != "" {
+		return o.PayloadPath
+	}
+
+	return filepath.Join(o.OverlaysDir(), image.RegistryPath())
 }
 
 func (o Output) CatalystConfigDir() string {

@@ -162,6 +162,7 @@ elementalEmbeddedRegistry:
       credentials:
         username: user
         password: pass
+  payload: http://imagecache.example.com/cluster-payload.tar
 ```
 
 * `manifests` - Optional; Defines remote Kubernetes manifests to be deployed on the cluster.
@@ -198,6 +199,7 @@ elementalEmbeddedRegistry:
     * `credentials` - Required;
       * `username` - Required; Defines the username for accessing the specified registry.
       * `password` - Required; Defines the password for accessing the specified registry.
+  * `payload` - Optional; Keeps the container images out of the image and tells the node where to fetch them from at first boot instead. Without it the images are embedded in the image. Supports `http://` and `https://` URLs of the payload tarball and `LABEL=<name>` for a filesystem (an attached disk or ISO) carrying the payload directory. The kernel command line argument `elm.payload=<source>` overrides the configured value at boot. See [Air-gapped images](image-customization.md#air-gapped-images).
 
 ### Kubernetes Directory
 

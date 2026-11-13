@@ -217,6 +217,25 @@ podman run -it \
   --airgap
 ```
 
+### Registry payload
+
+The container images are by far the largest part of an air-gapped image and the only part that changes with every
+Kubernetes or workload release. Setting `elementalEmbeddedRegistry.payload` in `kubernetes/cluster.yaml` keeps them
+out of the image: the customization writes the registry content next to the image as the *payload*, and
+`elemental-registry.service` fetches it at first boot before serving it. The image itself stays small, the same image
+serves several releases, and the payload can be built and distributed on its own.
+
+The payload source decides the output form and how the node obtains it:
+
+| `payload` | Customization output | At first boot |
+|---|---|---|
+| `http://` or `https://` URL | `<image>-payload.tar` | Downloaded from the URL and extracted |
+| `LABEL=<name>` | `<image>-payload/` directory | Copied from the filesystem labelled `<name>`, e.g. an attached disk or an ISO built from the directory |
+
+The payload must be reachable from the node at first boot, from the same network that serves the installer in a netboot
+or Metal3 setup for example. The kernel command line argument `elm.payload=<source>` overrides the configured source, so
+the same image can be booted against different payload locations.
+
 ## Booting a customized image
 
 > **NOTE:** The below RAM and vCPU resources are just reference values, feel free to tweak them based on what your environment needs.

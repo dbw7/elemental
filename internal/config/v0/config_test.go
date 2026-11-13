@@ -358,6 +358,38 @@ iso:
 		}
 	})
 
+	It("Validates the embedded registry payload source", func() {
+		clusterFile := filepath.Join(string(configDir), "kubernetes", "cluster.yaml")
+		clusterYAML := `
+elementalEmbeddedRegistry:
+  payload: %s
+`
+		for _, tc := range []struct {
+			payload string
+			valid   bool
+		}{
+			{payload: "http://server/payload.tar", valid: true},
+			{payload: "https://server:8443/cluster/payload.tar", valid: true},
+			{payload: "LABEL=PAYLOAD", valid: true},
+			{payload: "LABEL=", valid: false},
+			{payload: "nfs://server/payload", valid: false},
+			{payload: "/dev/sdb1", valid: false},
+			{payload: "server/payload.tar", valid: false},
+		} {
+			Expect(fs.WriteFile(clusterFile, []byte(fmt.Sprintf(clusterYAML, tc.payload)), vfs.FilePerm)).To(Succeed())
+
+			conf, err := Parse(fs, configDir)
+			if tc.valid {
+				Expect(err).NotTo(HaveOccurred(), tc.payload)
+				Expect(conf.Kubernetes.ElementalEmbeddedRegistry.Payload).To(Equal(kubernetes.PayloadSource(tc.payload)))
+				continue
+			}
+
+			Expect(err).To(HaveOccurred(), tc.payload)
+			Expect(err.Error()).To(ContainSubstring(fmt.Sprintf("must be an http or https URL or LABEL=<filesystem label>, but got %q", tc.payload)))
+		}
+	})
+
 	It("Fails on missing required release configuration", func() {
 		releaseFile := filepath.Join(string(configDir), "release.yaml")
 		Expect(fs.Remove(releaseFile)).To(Succeed())

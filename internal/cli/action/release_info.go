@@ -103,7 +103,7 @@ func ReleaseInfo(_ context.Context, cmd *cli.Command) error {
 }
 
 func resolveManifest(system *sys.System, uri string, local bool) (*resolver.ResolvedManifest, error) {
-	output, err := config.NewOutput(system.FS(), "", "")
+	output, err := config.NewOutput(system.FS(), "", "", "")
 	if err != nil {
 		return nil, err
 	}
